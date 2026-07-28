@@ -1,0 +1,27 @@
+# ---- 이미지 / 데이터 (저장소에는 코드만 올린다) ----
+Images/
+Nosie/
+testset/
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tif
+*.tiff
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- 에디터 / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- 도구 ----
+.omc/
