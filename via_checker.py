@@ -513,7 +513,11 @@ def _find_via(roi: np.ndarray,
     bh_thr = max(BLACKHAT_MIN, med * BLACKHAT_RATIO)
 
     cand = (dark & (bh > bh_thr) & (inner > 0)).astype(np.uint8)
-    cand = cv2.morphologyEx(cand, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    # 여기서 MORPH_OPEN 으로 잡티를 지우면 안 된다.
+    # 대비가 약한 VIA(코어 밝기 = PAD 밝기의 0.45배)는 임계 아래로 내려가는 화소가
+    # 4~5개뿐이고 모양도 십자/대각이라 2x2 로 열면 통째로 사라진다(= 오검출 VIA_MISSING).
+    # 잡티 제거는 아래 연결성분 면적 하한(VIA_MIN_AREA)이 이미 담당한다.
+    # dark AND blackhat 두 조건을 동시에 통과한 화소가 우연히 4개나 이어질 확률은 낮다.
 
     num, lab, stats, cents = cv2.connectedComponentsWithStats(cand, 8)
     max_area = max(int(np.count_nonzero(shape) * VIA_MAX_AREA_RATIO), VIA_MIN_AREA)

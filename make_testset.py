@@ -52,10 +52,24 @@ from pad_via_inspector import (
 # ----------------------------------------------------------------------------
 CAD_ERODE_PX = 2                  # 설계도 축소량(px). "실제보다 살짝 작음"
 
+# --- PAD 형상 균일화 -------------------------------------------------------
+# 실측 PAD 는 원본 이미지에서 따오므로 모양·크기가 제각각이다(면적 67~3068,
+# 종횡비 0.21~5.43). 검사 성능을 형상 변수 없이 재려면 전부 같게 만들어야 한다.
+# 원본 PAD 자리는 그대로 두고 모양만 동일 크기 정사각으로 다시 그린다.
+PAD_UNIFORM = True                # False 면 원본 PAD 형상을 그대로 사용
+PAD_SIDE = 16                     # 정사각 한 변(px). 면적 약 253 -> via_target 범위 안
+PAD_CORNER = 2                    # 모서리 라운드 반지름(px). 원형도 0.72 하한 여유 확보
+PAD_MIN_GAP = 5                   # 이웃 PAD 사이 최소 간격(px). 붙어서 한 덩어리 되는 것 방지
+
 VIA_RADIUS_RATIO = 0.13           # PAD 등가반지름 대비 VIA 코어 반지름
 VIA_RADIUS_MIN = 2.0
 VIA_RADIUS_MAX = 5.0
-VIA_DARKNESS = 0.25               # VIA 코어 밝기 = PAD 밝기 * 이 값
+
+# VIA 코어 밝기 = PAD 밝기 * 이 값. 작을수록 진하다.
+# 대비가 약한 VIA 까지 검출되는지 보려고 3단계를 골고루 섞는다.
+VIA_DARKNESS_LEVELS = (0.12, 0.25, 0.45)
+VIA_DARKNESS_NAMES = ("dark", "mid", "light")
+
 VIA_EDGE_SOFT = 0.9               # 가장자리 번짐(px 단위 시그마 가산)
 VIA_CENTER_JITTER = 0.4           # 양품 VIA의 중심 흔들림(px). 실사 느낌용
 
@@ -93,10 +107,11 @@ def _pad_color_stats(bgr: np.ndarray, label_map: np.ndarray,
 # VIA 그리기
 # ----------------------------------------------------------------------------
 def draw_via(bgr: np.ndarray, center: Tuple[float, float], radius: float,
-             rng: random.Random) -> None:
+             rng: random.Random, darkness: float = 0.25) -> None:
     """(cx, cy)에 실사에 가까운 어두운 VIA 점을 그린다 (in-place).
 
     가우시안 프로파일로 중심이 가장 어둡고 가장자리로 갈수록 원래 PAD 색에 수렴.
+    darkness 가 작을수록 진하다 (0.12 진함 / 0.25 중간 / 0.45 연함).
     """
     H, W = bgr.shape[:2]
     cx, cy = float(center[0]), float(center[1])
@@ -117,7 +132,7 @@ def draw_via(bgr: np.ndarray, center: Tuple[float, float], radius: float,
     weight = np.clip(weight, 0.0, 1.0).astype(np.float32)
 
     roi = bgr[y0:y1, x0:x1].astype(np.float32)
-    dark = roi * VIA_DARKNESS
+    dark = roi * float(darkness)
     # VIA는 완전 무채색 검정이 아니라 약간 갈색빛을 띔 -> R채널을 조금 덜 낮춤
     dark[..., 2] *= 1.22
     dark[..., 1] *= 1.05
@@ -126,6 +141,91 @@ def draw_via(bgr: np.ndarray, center: Tuple[float, float], radius: float,
     noise = np.random.normal(0.0, 3.0, out.shape).astype(np.float32) * weight[..., None]
     out = np.clip(out + noise, 0, 255)
     bgr[y0:y1, x0:x1] = out.astype(np.uint8)
+
+
+# ----------------------------------------------------------------------------
+# PAD 형상 균일화
+# ----------------------------------------------------------------------------
+def _square_layer(shape: Tuple[int, int], center: Tuple[int, int],
+                  side: int, corner: int) -> np.ndarray:
+    """모서리가 살짝 둥근 정사각 알파맵(0~255)."""
+    H, W = shape
+    layer = np.zeros((H, W), np.uint8)
+    cx, cy = center
+    h = side // 2
+    r = int(np.clip(corner, 0, h - 1))
+    # 십자 두 개로 라운드 사각을 만든 뒤 네 귀퉁이에 원을 채운다
+    cv2.rectangle(layer, (cx - h + r, cy - h), (cx + h - r, cy + h), 255, -1)
+    cv2.rectangle(layer, (cx - h, cy - h + r), (cx + h, cy + h - r), 255, -1)
+    if r > 0:
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                cv2.circle(layer, (cx + sx * (h - r), cy + sy * (h - r)), r, 255, -1)
+    return layer
+
+
+def _paint_texture(bgr: np.ndarray, alpha: np.ndarray,
+                   mean: np.ndarray, std: np.ndarray) -> None:
+    """알파맵 자리에 PAD 질감을 합성한다 (in-place).
+
+    백색잡음만 쓰면 소금후추처럼 보이므로 저주파 얼룩 + 약한 고주파로 섞는다.
+    """
+    H, W = bgr.shape[:2]
+    low = np.random.normal(0.0, 1.0, (H, W, 3)).astype(np.float32)
+    low = cv2.GaussianBlur(low, (0, 0), 2.5)
+    low /= (low.std() + 1e-6)
+    high = np.random.normal(0.0, 1.0, (H, W, 3)).astype(np.float32)
+    scale = np.asarray(std, np.float32)
+    tex = np.asarray(mean, np.float32) + low * scale * 0.75 + high * scale * 0.25
+    a = (cv2.GaussianBlur(alpha, (3, 3), 0).astype(np.float32) / 255.0)[..., None]
+    out = bgr.astype(np.float32) * (1 - a) + np.clip(tex, 0, 255) * a
+    bgr[:] = np.clip(out, 0, 255).astype(np.uint8)
+
+
+def uniformize_pads(bgr: np.ndarray, seg, bg_mean: np.ndarray, bg_std: np.ndarray
+                    ) -> np.ndarray:
+    """실측 PAD 를 전부 지우고 같은 자리에 동일한 정사각 PAD 를 다시 그린다.
+
+    - 위치 : 원본 PAD 무게중심 그대로 (배경·조명·노이즈는 실사 유지)
+    - 모양 : 한 변 PAD_SIDE 인 라운드 정사각, 전부 동일
+    - 색   : 원본의 전체 PAD 화소 통계 하나로 통일
+
+    서로 너무 가까운 PAD 는 정사각으로 바꾸면 한 덩어리로 붙어버리므로
+    큰 것부터 자리를 잡고 간격이 모자라면 버린다.
+    """
+    H, W = bgr.shape[:2]
+    pad_px = bgr[seg.pad_mask > 0].astype(np.float32)
+    if pad_px.size == 0:
+        return bgr
+    pmean, pstd = pad_px.mean(axis=0), pad_px.std(axis=0) + 1e-3
+
+    out = bgr.copy()
+    # 1) 기존 PAD 를 배경으로 밀어버린다
+    grown = cv2.dilate((seg.pad_mask > 0).astype(np.uint8), np.ones((5, 5), np.uint8))
+    idx = grown > 0
+    n = int(np.count_nonzero(idx))
+    if n:
+        out[idx] = np.clip(np.random.normal(bg_mean, bg_std, (n, 3)), 0, 255).astype(np.uint8)
+        out[idx] = cv2.GaussianBlur(out, (3, 3), 0)[idx]
+
+    # 2) 같은 자리에 동일한 정사각을 놓는다 (면적 큰 PAD 우선)
+    h = PAD_SIDE // 2
+    margin = h + 2
+    taken = np.zeros((H, W), np.uint8)
+    alpha = np.zeros((H, W), np.uint8)
+    for p in sorted(seg.pads, key=lambda q: -q.area):
+        cx, cy = int(round(p.centroid[0])), int(round(p.centroid[1]))
+        if not (margin <= cx < W - margin and margin <= cy < H - margin):
+            continue
+        if taken[cy, cx]:
+            continue
+        sq = _square_layer((H, W), (cx, cy), PAD_SIDE, PAD_CORNER)
+        alpha = np.maximum(alpha, sq)
+        g = PAD_SIDE + PAD_MIN_GAP
+        cv2.rectangle(taken, (cx - g, cy - g), (cx + g, cy + g), 255, -1)
+
+    _paint_texture(out, alpha, pmean, pstd)
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -165,24 +265,18 @@ def find_free_spot(pad_mask: np.ndarray, radius: int,
 
 def add_pad(bgr: np.ndarray, center: Tuple[int, int], radius: int,
             pad_mean: np.ndarray, pad_std: np.ndarray) -> None:
-    """배경에 없어야 할 PAD를 새로 그린다 -> EXTRA_PAD."""
-    H, W = bgr.shape[:2]
-    layer = np.zeros((H, W), np.uint8)
-    cv2.circle(layer, center, radius, 255, -1)
-    layer = cv2.GaussianBlur(layer, (5, 5), 0)
+    """배경에 없어야 할 PAD를 새로 그린다 -> EXTRA_PAD.
 
-    # 실제 PAD는 매끈하다. 백색잡음을 그대로 쓰면 소금후추처럼 보이므로
-    # 저주파 얼룩 + 약한 고주파 잡음으로 텍스처를 합성한다.
-    low = np.random.normal(0.0, 1.0, (H, W, 3)).astype(np.float32)
-    low = cv2.GaussianBlur(low, (0, 0), 2.5)
-    low /= (low.std() + 1e-6)
-    high = np.random.normal(0.0, 1.0, (H, W, 3)).astype(np.float32)
-    scale = np.asarray(pad_std, np.float32)
-    tex = np.asarray(pad_mean, np.float32) + low * scale * 0.75 + high * scale * 0.25
-    tex = np.clip(tex, 0, 255).astype(np.float32)
-    a = (layer.astype(np.float32) / 255.0)[..., None]
-    out = bgr.astype(np.float32) * (1 - a) + tex * a
-    bgr[:] = np.clip(out, 0, 255).astype(np.uint8)
+    PAD_UNIFORM 이면 다른 PAD 와 똑같은 정사각으로 그린다. 여기만 원형이면
+    "모양이 다르다"는 단서로 구분될 수 있어 형상 균일화의 의미가 없어진다.
+    """
+    H, W = bgr.shape[:2]
+    if PAD_UNIFORM:
+        layer = _square_layer((H, W), center, PAD_SIDE, PAD_CORNER)
+    else:
+        layer = np.zeros((H, W), np.uint8)
+        cv2.circle(layer, center, radius, 255, -1)
+    _paint_texture(bgr, layer, pad_mean, pad_std)
 
 
 # ----------------------------------------------------------------------------
@@ -245,6 +339,17 @@ def build_one(src_path: str, scenario: str, rng: random.Random,
     if not seg.pads:
         return None
 
+    # --- PAD 형상 균일화 ---
+    # 원본을 갈아끼운 뒤 다시 분할한다. 이렇게 해야 설계도·정답·검사 입력이
+    # 전부 같은(균일한) PAD 를 기준으로 만들어진다.
+    if PAD_UNIFORM:
+        bgm, bgs = _background_stats(src, seg.pad_mask)
+        src = uniformize_pads(src, seg, bgm, bgs)
+        pre = step1_preprocess(src, cfg)
+        seg = step2_segment_pads(pre, cfg)
+        if not seg.pads:
+            return None
+
     # --- VIA 대상 PAD 선별 ---
     targets = [p for p in seg.pads if is_via_target(p, cfg)]
     if not targets:
@@ -291,6 +396,15 @@ def build_one(src_path: str, scenario: str, rng: random.Random,
     design_via_pts = [p.centroid for p in targets if plan[p.pad_id] != "extra"]
     via_cad = build_via_design_mask(src.shape[:2], design_via_pts, VIA_DESIGN_DOT_RADIUS)
 
+    # --- VIA 밝기 배분 ---
+    # 진함/중간/연함을 1/3 씩 균등하게 섞는다. 단순 round-robin 은 이미지마다
+    # 항상 "진함"부터 시작해 전체 집계에서 진함이 많아지므로 섞어서 뽑는다.
+    n_draw = sum(1 for p in targets if plan[p.pad_id] != "none")
+    n_lv = len(VIA_DARKNESS_LEVELS)
+    bag = [i % n_lv for i in range(n_draw)]
+    rng.shuffle(bag)
+    bag_it = iter(bag)
+
     # --- VIA 그리기 ---
     via_gt: List[Dict[str, Any]] = []
     for p in targets:
@@ -312,12 +426,15 @@ def build_one(src_path: str, scenario: str, rng: random.Random,
             # PAD 밖으로 나가지 않게 제한
             mag = min(mag, max(p.equiv_radius - rad - 2.0, 1.0))
             pos = (cx + mag * np.cos(ang), cy + mag * np.sin(ang))
-        draw_via(img, pos, rad, rng)
+        lv = next(bag_it)
+        draw_via(img, pos, rad, rng, VIA_DARKNESS_LEVELS[lv])
         via_gt.append({
             "pad_id": p.pad_id, "pad_center": pad_center, "mode": mode,
             "via_center": [round(pos[0], 2), round(pos[1], 2)],
             "radius": round(rad, 2),
             "offset_norm": round(float(np.hypot(pos[0] - cx, pos[1] - cy)) / p.equiv_radius, 4),
+            "darkness": VIA_DARKNESS_LEVELS[lv],
+            "darkness_level": VIA_DARKNESS_NAMES[lv],
         })
         if mode == "shift":
             injected.append({"kind": "VIA_OFFSET", "pad_id": p.pad_id,
