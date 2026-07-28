@@ -19,6 +19,7 @@ PCB PAD 와 VIA(중앙 검은 점)를 설계도와 대조해 검사하는 순수
 | 파일 | 역할 |
 |---|---|
 | **`pad_via_inspector.py`** | **검사 엔진 (단일 파일, 복붙용).** 이 파일 하나만 있으면 동작합니다 |
+| **`via_checker.py`** | **VIA 검사만 떼어낸 단독 모듈.** 이미 준비된 이미지 4개를 받아 VIA만 판정 |
 | `make_testset.py` | 원본 이미지에 VIA·결함을 주입해 테스트셋과 설계도를 생성 |
 | `run_inspection.py` | 테스트셋 전체를 검사하고 정답과 대조해 정확도 리포트 |
 | `eval_padlevel.py` | PAD 단위 혼동행렬 + 편심 임계값 분리도 분석 |
@@ -274,6 +275,100 @@ python pad_via_inspector.py board.png board_cad.png --meta board_cad.json \
 from pad_via_inspector import build_via_design_mask
 mask = build_via_design_mask((220, 220), [(150.5, 32.1), (180.6, 32.1)], radius=2)
 ```
+
+---
+
+## VIA 검사만 쓰기 — `via_checker.py`
+
+이진화와 설계도가 **이미 준비되어 있고** VIA 판정만 필요할 때 쓰는 단독 모듈입니다.
+`pad_via_inspector.py` 없이 **이 파일 하나만** 다른 프로젝트에 붙여 넣으면 됩니다.
+
+### 입력 4개
+
+| # | 인자 | 내용 |
+|---|---|---|
+| 1 | `image` | 원본 이미지 (BGR/GRAY ndarray 또는 경로) |
+| 2 | `bin_mask` | 원본의 이진화 결과 = 실측 PAD 마스크 |
+| 3 | `pad_design` | PAD 설계도 (이진) |
+| 4 | `via_design` | VIA 설계도 (이진) |
+
+네 이미지는 **같은 해상도·같은 좌표계**여야 합니다. 크기가 다르면 조용히 리사이즈하지 않고 `"-1"` 로 실패합니다.
+
+### 검사 대상
+
+**VIA 설계도에 점이 찍힌 PAD만** 검사합니다.
+VIA 설계도의 각 연결요소 무게중심이 어느 설계 PAD 안에 있는지로 대상을 결정하며,
+설계상 VIA 가 없는 PAD 는 아예 건드리지 않습니다.
+
+```python
+from via_checker import check_via, ViaCheckConfig
+
+res = check_via("board.png", "board_bin.png", "pad_cad.png", "via_cad.png")
+
+print(res.code)        # "1" / "99" / "-1"
+print(res.summary())   # code=1  target=13  {OK=13}
+
+for f in res.findings:
+    print(f["pad_id"], f["status"], f.get("offset_norm"))
+```
+
+### 판정
+
+| 설계 VIA | 실물 | 판정 | code |
+|---|---|---|---|
+| 있음 | 있음 · 정중앙 | `OK` | `"1"` |
+| 있음 | 있음 · 쏠림 | `VIA_OFFSET` | `"99"` |
+| 있음 | 없음 | `VIA_MISSING` | `"99"` |
+| 있음 | 실물 PAD 자체가 없음 | `PAD_ABSENT` | code 에 반영 안 함 |
+
+`PAD_ABSENT` 는 실측 이진 마스크가 설계 PAD 영역을 `pad_present_coverage`(기본 0.55) 만큼도
+덮지 못한 경우입니다. PAD 가 없으면 VIA 가 없는 것이 당연하므로 VIA 불량으로 세지 않습니다.
+(PAD 누락은 `"24"` 영역 — `pad_via_inspector.py` 담당)
+
+### 자주 건드리는 설정
+
+```python
+cfg = ViaCheckConfig(
+    design_pad_dilate = 2,       # 설계 PAD 가 실물보다 작게 그려진 만큼 되돌림 (0=그대로)
+    via_offset_tol    = 0.25,    # 반지름 대비 허용 편심 (스케일 불변)
+    via_offset_min_px = 2.2,     # 절대 허용 편심(px)
+    center_ref        = "pad",   # "pad"=설계 PAD 중심(정중앙) / "design_via"=VIA 설계 좌표
+    check_pad_present = True,
+)
+res = check_via(img, binm, padm, viam, cfg=cfg)
+
+# PAD 픽셀 크기가 다른 실이미지라면 배율만 넘기면 됩니다 (면적 s², 길이 s 자동 보정)
+cfg = ViaCheckConfig().scaled(실제_PAD_등가반지름 / 6.0)
+```
+
+### 결과 이미지
+
+```python
+res = check_via(img, binm, padm, viam, draw=True)
+cv2.imwrite("out.png", res.overlay)   # 원본 해상도, 마커만
+```
+
+정상 = 초록 원 + 초록 점 / 편심 = 주황 화살표 / VIA 없음 = 빨강 X / PAD 없음 = 회색 원
+
+### 단독 실행
+
+```bash
+python via_checker.py board.png board_bin.png pad_cad.png via_cad.png --out result.png
+```
+
+### 검증
+
+동일한 44장 테스트셋 기준 — **PAD 703/703 = 1.0000**, 이미지 코드 **44/44 = 1.0000**.
+
+| 기대 \ 판정 | OK | VIA_OFFSET | VIA_MISSING |
+|---|---|---|---|
+| OK (정중앙) | **641** | 0 | 0 |
+| 쏠림 | 0 | **35** | 0 |
+| 없음 | 0 | 0 | **27** |
+
+> 전체 엔진의 714 와 개수가 다른 이유: `via_checker.py` 는 설계 대상 PAD 만 훑으므로
+> 설계에 없는 VIA(과잉, 11개)는 검사 범위 밖입니다. 그 항목이 필요하면
+> `pad_via_inspector.py` 의 `via_design_check=True` 를 쓰세요.
 
 ---
 

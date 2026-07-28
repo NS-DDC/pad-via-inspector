@@ -46,9 +46,14 @@ priority: Tuple[str, ...] = (CODE_PAD_DEFECT, CODE_VIA_DEFECT)   # "24" -> "99" 
 | 파일 | 역할 |
 |---|---|
 | `pad_via_inspector.py` | **검사 본체.** 외부 프로젝트에 이 파일 하나만 복사하면 동작 |
+| `via_checker.py` | **VIA 판정만 떼어낸 단독 모듈.** 원본·이진화·PAD설계도·VIA설계도 4개를 받아 §5 로직만 수행 |
 | `make_testset.py` | 테스트셋 생성기 (VIA 그리기 + PAD 결함 주입 + 설계도 생성) |
 | `run_inspection.py` | 원샷 / 단계별 두 가지 사용 예시 및 배치 정확도 측정 |
 | `eval_padlevel.py` | PAD 단위 혼동행렬 + 편심 임계값 분리도 분석 |
+
+`via_checker.py` 는 이 문서의 **STEP 4(VIA 검사)** 만 담고 있습니다.
+전처리·PAD 분할·PAD 유무 검사(code `"24"`)가 이미 끝나 있고 VIA 판정만 필요할 때 쓰며,
+검사 대상은 **VIA 설계도에 점이 찍힌 PAD 로 한정**됩니다. 사용법은 README 참고.
 
 `pad_via_inspector.py` 는 **프로젝트 내부 import 가 전혀 없습니다.**
 의존성은 `opencv-python`, `numpy`, 표준 라이브러리뿐이며 **Python 3.9** 문법으로 작성되었습니다.
