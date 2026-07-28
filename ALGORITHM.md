@@ -55,6 +55,11 @@ priority: Tuple[str, ...] = (CODE_PAD_DEFECT, CODE_VIA_DEFECT)   # "24" -> "99" 
 전처리·PAD 분할·PAD 유무 검사(code `"24"`)가 이미 끝나 있고 VIA 판정만 필요할 때 쓰며,
 검사 대상은 **VIA 설계도에 점이 찍힌 PAD 로 한정**됩니다. 사용법은 README 참고.
 
+단독 모듈은 VIA 불량을 두 코드로 나눕니다 — **`"42"` VIA 없음 / `"99"` VIA 쏠림**
+(한 이미지에 둘 다면 `"42"` 우선). 또 실물 이미지 대응으로 두 가지가 더 들어 있습니다.
+**PAD 별 국소 정합**(설계도-실물 어긋남을 흡수해 거짓 쏠림 제거)과
+**이중 커버리지 `max(전체, VIA자리제외)`**(VIA 때문에 생긴 구멍에 강건, 홀필링 미사용).
+
 `pad_via_inspector.py` 는 **프로젝트 내부 import 가 전혀 없습니다.**
 의존성은 `opencv-python`, `numpy`, 표준 라이브러리뿐이며 **Python 3.9** 문법으로 작성되었습니다.
 (`from __future__ import annotations` + `typing.List/Dict/Optional/Union` 사용, `list[int]` 같은 3.10 문법 미사용)

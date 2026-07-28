@@ -8,7 +8,8 @@
     code, result = check_via(원본, 이진화, PAD설계도, VIA설계도)
 
     #  code   : "1"  양품
-    #           "99" VIA 없음 / VIA 쏠림
+    #           "42" VIA 없음        (둘 다면 42 가 우선)
+    #           "99" VIA 쏠림
     #           "-1" 입력 오류 (이때 result 는 None)
     #  result : 원본과 같은 해상도의 결과 이미지
 
@@ -42,10 +43,30 @@
 --------------------------------------------------------------------------
   OK           VIA 가 있고 정중앙        -> code "1"
   VIA_OFFSET   VIA 가 있는데 쏠림        -> code "99"
-  VIA_MISSING  VIA 가 없음               -> code "99"
+  VIA_MISSING  VIA 가 없음               -> code "42"
   PAD_ABSENT   실물 PAD 자체가 없음      -> code 에 반영 안 함 (PAD 누락은 별개 검사 영역)
 
-  편심 = ||VIA중심 - 설계PAD중심|| / 설계PAD등가반지름
+  편심 = ||VIA중심 - PAD중심|| / PAD등가반지름
+
+--------------------------------------------------------------------------
+실물 이미지에서 자주 나던 오판정 두 가지를 어떻게 막는가
+--------------------------------------------------------------------------
+  1) "쏠림이 아닌데 쏠림"
+     설계도와 실물은 완벽히 겹치지 않습니다. 2~3px 만 어긋나도 PAD 반지름이
+     6px 수준이면 편심 0.3~0.5 가 그냥 나옵니다. 그래서 PAD 마다 설계 형상을
+     실측 마스크 쪽으로 조금 평행이동시켜(=국소 정합) 기준 중심을 잡습니다.
+     - 정합량은 반지름의 ALIGN_MAX_RATIO 이내로 묶어 폭주를 막습니다.
+     - VIA 가 한가운데면 구멍이 대칭이라 무게중심이 안 밀립니다.
+     - VIA 가 쏠려 있으면 무게중심이 반대편으로 밀려 오히려 편심이 커집니다.
+       즉 진짜 쏠림은 지워지지 않고 더 잘 드러납니다.
+
+  2) "VIA 구멍 때문에 PAD 가 없다고 나옴"
+     실물에서는 VIA 가 이진화 마스크에 구멍으로 뚫립니다. 면적 커버리지만
+     보면 이 구멍 때문에 멀쩡한 PAD 가 PAD_ABSENT 로 빠집니다.
+     그래서 커버리지를 두 가지로 재고 둘 중 큰 값을 씁니다.
+       full : 설계 PAD 전체 대비
+       excl : VIA 가 있어야 할 자리를 빼고 계산   <- 구멍에 영향 없음
+     구멍 메우기(hole filling) 는 쓰지 않습니다.
 
 의존성 : numpy, opencv-python  (Python 3.9+)
 """
@@ -58,15 +79,20 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import cv2
 import numpy as np
 
-__all__ = ["check_via", "debug_via", "CODE_OK", "CODE_VIA_DEFECT", "CODE_ERROR"]
+__all__ = ["check_via", "debug_via",
+           "CODE_OK", "CODE_VIA_MISSING", "CODE_VIA_OFFSET", "CODE_ERROR"]
 
 
 # ============================================================================
 # 결과 코드
 # ============================================================================
-CODE_OK = "1"           # 양품
-CODE_VIA_DEFECT = "99"  # VIA 없음 / VIA 쏠림
-CODE_ERROR = "-1"       # 입력 오류
+CODE_OK = "1"            # 양품
+CODE_VIA_MISSING = "42"  # VIA 없음
+CODE_VIA_OFFSET = "99"   # VIA 쏠림
+CODE_ERROR = "-1"        # 입력 오류
+
+# 한 이미지에 둘 다 있으면 앞쪽이 이깁니다 (결손이 위치오차보다 중대).
+CODE_PRIORITY = [CODE_VIA_MISSING, CODE_VIA_OFFSET]
 
 
 # ============================================================================
@@ -80,8 +106,15 @@ DESIGN_PAD_SHRINK = 2
 # 편심 판정. 아래 두 조건을 '모두' 넘어야 불량입니다.
 #   상대 : 편심거리 / PAD반지름 > OFFSET_TOL
 #   절대 : 편심거리(px)        > OFFSET_MIN_PX      <- 작은 PAD 의 반올림 오차 흡수용
-OFFSET_TOL = 0.25
+# 테스트셋 실측 : 정중앙 최대 0.119 / 쏠림 최소 0.448 -> 그 사이에서 정중앙 쪽에 여유를 둠
+OFFSET_TOL = 0.30
 OFFSET_MIN_PX = 2.2
+
+# 국소 정합. 설계 PAD 를 실측 마스크 무게중심 쪽으로 이만큼까지 평행이동해서
+# 설계도-실물 어긋남이 거짓 쏠림으로 둔갑하는 것을 막습니다. 0 이면 정합 안 함.
+ALIGN_MAX_RATIO = 0.40    # 최대 이동량 = PAD반지름 * 이 값
+ALIGN_MARGIN = 2          # 무게중심을 잴 때 설계 PAD 를 몇 px 키운 창을 볼지
+ALIGN_MIN_COVER = 0.30    # 창 안 실측 픽셀이 이 비율도 안 되면 정합 생략
 
 # VIA 후보 : PAD 밝기 중앙값 * DARK_RATIO 보다 어두운 픽셀
 DARK_RATIO = 0.62
@@ -98,8 +131,14 @@ VIA_MAX_AREA_RATIO = 0.25     # 최대 = PAD 면적 * 이 값
 # 탐색 영역을 PAD 안쪽으로 몇 px 깎을지
 PAD_ERODE = 1
 
-# 실물 PAD 존재 판정. 설계 PAD 영역이 이 비율만큼도 이진화 마스크에 안 덮이면 PAD 없음.
+# 실물 PAD 존재 판정. 커버리지가 이 값 미만이면 PAD 없음.
+# 커버리지는 full 과 excl 중 큰 값입니다 (아래 VIA_EXCLUDE_RATIO 설명 참고).
 PAD_PRESENT_MIN = 0.55
+
+# excl 커버리지에서 제외할 원의 반지름 = PAD반지름 * 이 값.
+# 실물 VIA 는 이진화 마스크에 구멍으로 뚫리므로, VIA 가 있어야 할 자리를 빼고 재면
+# 구멍 크기와 무관하게 PAD 존재 여부를 판정할 수 있습니다 (구멍 메우기 불필요).
+VIA_EXCLUDE_RATIO = 0.75
 
 # 설계도 잡티 제거용 최소 px. 검사 대상은 "VIA 설계도에 점이 있는 PAD" 로만 정해지므로
 # 여기서는 1~3px 짜리 노이즈만 걸러내면 됩니다. 값이 작아 스케일이 바뀌어도 안전합니다.
@@ -125,7 +164,8 @@ def check_via(image: Union[str, np.ndarray],
 
         code, result = check_via(원본, 이진화, PAD설계도, VIA설계도)
 
-    code 는 "1"(양품) / "99"(VIA 불량) / "-1"(입력 오류) 중 하나입니다.
+    code 는 "1"(양품) / "42"(VIA 없음) / "99"(VIA 쏠림) / "-1"(입력 오류) 중 하나입니다.
+    한 이미지에 없음과 쏠림이 같이 있으면 "42" 가 우선합니다.
     "-1" 이면 result 는 None 이고, 이유가 표준에러로 출력됩니다.
     """
     code, src, rows, err = _run(image, bin_mask, pad_design, via_design)
@@ -149,9 +189,11 @@ def debug_via(image: Union[str, np.ndarray],
     - 결과 이미지에 PAD 번호를 함께 그립니다
     - rows 는 PAD 별 dict 목록입니다. 들어있는 키:
         pad_id, status, pad_center, pad_radius, pad_area, pad_coverage,
-        design_via, via_center, via_area, offset_px, offset_norm,
+        align_shift, design_via, via_center, via_area, offset_px, offset_norm,
         pad_median, dark_threshold
       (해당 없는 항목은 None)
+
+    align_shift 가 크게 나오면 설계도와 실물이 그만큼 어긋나 있다는 뜻입니다.
     """
     code, src, rows, err = _run(image, bin_mask, pad_design, via_design)
     if code == CODE_ERROR:
@@ -281,9 +323,11 @@ def _run(image: Union[str, np.ndarray],
         dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * d + 1, 2 * d + 1))
     ero = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
                                     (2 * PAD_ERODE + 1, 2 * PAD_ERODE + 1))
+    alk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                    (2 * ALIGN_MARGIN + 1, 2 * ALIGN_MARGIN + 1))
 
     rows: List[Dict[str, Any]] = []
-    bad = False
+    found_status = set()
 
     for pid in sorted(design_vias):
         dvx, dvy = design_vias[pid]
@@ -293,6 +337,7 @@ def _run(image: Union[str, np.ndarray],
         y0, y1 = max(y - mg, 0), min(y + h + mg, H)
 
         roi = gray[y0:y1, x0:x1]
+        act = actual[y0:y1, x0:x1]
 
         # 기준 형상은 '설계 PAD' 를 쓴다.
         # VIA 가 가장자리로 심하게 쏠리면 어두운 VIA 가 배경과 이어져
@@ -309,6 +354,9 @@ def _run(image: Union[str, np.ndarray],
         cx, cy = float(xs.mean()), float(ys.mean())
         radius = float(np.sqrt(area / np.pi))
 
+        # ---- 국소 정합 : 설계도-실물 어긋남을 흡수한다 ----
+        shape, cx, cy, shift = _align(shape, act, cx, cy, radius, area, alk)
+
         row: Dict[str, Any] = {
             "pad_id": pid,
             "status": None,
@@ -316,6 +364,7 @@ def _run(image: Union[str, np.ndarray],
             "pad_radius": round(radius, 2),
             "pad_area": int(area),
             "pad_coverage": None,
+            "align_shift": (round(shift[0], 2), round(shift[1], 2)),
             "design_via": (round(dvx, 2), round(dvy, 2)),
             "via_center": None,
             "via_area": None,
@@ -326,9 +375,9 @@ def _run(image: Union[str, np.ndarray],
         }
 
         # ---- 실물 PAD 가 그 자리에 있는지 ----
-        cover = np.count_nonzero((shape > 0) & (actual[y0:y1, x0:x1] > 0)) / area
-        row["pad_coverage"] = round(float(cover), 3)
-        if cover < PAD_PRESENT_MIN:
+        row["pad_coverage"] = round(
+            _coverage(shape, act, area, radius, dvx - x0, dvy - y0), 3)
+        if row["pad_coverage"] < PAD_PRESENT_MIN:
             # PAD 가 없으면 VIA 가 없는 게 당연하므로 VIA 불량으로 세지 않는다.
             row["status"] = "PAD_ABSENT"
             rows.append(row)
@@ -338,8 +387,8 @@ def _run(image: Union[str, np.ndarray],
         found = _find_via(roi, shape, radius, ero, row)
         if found is None:
             row["status"] = "VIA_MISSING"
+            found_status.add(CODE_VIA_MISSING)
             rows.append(row)
-            bad = True
             continue
 
         vx, vy = found["cx"] + x0, found["cy"] + y0
@@ -352,12 +401,82 @@ def _run(image: Union[str, np.ndarray],
         # 상대·절대 두 조건을 모두 넘어야 불량
         if row["offset_norm"] > OFFSET_TOL and dist > OFFSET_MIN_PX:
             row["status"] = "VIA_OFFSET"
-            bad = True
+            found_status.add(CODE_VIA_OFFSET)
         else:
             row["status"] = "OK"
         rows.append(row)
 
-    return (CODE_VIA_DEFECT if bad else CODE_OK), src, rows, ""
+    code = CODE_OK
+    for c in CODE_PRIORITY:
+        if c in found_status:
+            code = c
+            break
+    return code, src, rows, ""
+
+
+def _align(shape: np.ndarray,
+           act: np.ndarray,
+           cx: float,
+           cy: float,
+           radius: float,
+           area: float,
+           alk: np.ndarray) -> Tuple[np.ndarray, float, float, Tuple[float, float]]:
+    """설계 PAD 형상을 실측 마스크 쪽으로 조금 평행이동한다.
+
+    설계도와 실물이 2~3px 만 어긋나도 PAD 반지름이 6px 수준이면 편심이 0.3~0.5 로
+    잡혀 멀쩡한 VIA 가 전부 쏠림으로 나온다. 그 계통 오차만 걷어내는 것이 목적이다.
+
+    무게중심을 쓰는 이유 :
+      - VIA 가 한가운데면 구멍이 대칭이라 무게중심이 밀리지 않는다.
+      - VIA 가 쏠려 있으면 무게중심이 반대편으로 밀려 편심이 오히려 커진다.
+        즉 진짜 쏠림을 지우지 않는다.
+    이동량은 반지름의 ALIGN_MAX_RATIO 이내로 묶어 폭주를 막는다.
+    """
+    if ALIGN_MAX_RATIO <= 0:
+        return shape, cx, cy, (0.0, 0.0)
+
+    loc = (cv2.dilate(shape, alk) > 0) & (act > 0)
+    if np.count_nonzero(loc) < area * ALIGN_MIN_COVER:
+        return shape, cx, cy, (0.0, 0.0)
+
+    ly, lx = np.nonzero(loc)
+    lim = radius * ALIGN_MAX_RATIO
+    sx = float(np.clip(float(lx.mean()) - cx, -lim, lim))
+    sy = float(np.clip(float(ly.mean()) - cy, -lim, lim))
+    if abs(sx) < 1e-3 and abs(sy) < 1e-3:
+        return shape, cx, cy, (0.0, 0.0)
+
+    moved = cv2.warpAffine(shape, np.float32([[1, 0, sx], [0, 1, sy]]),
+                           (shape.shape[1], shape.shape[0]), flags=cv2.INTER_NEAREST)
+    return moved, cx + sx, cy + sy, (sx, sy)
+
+
+def _coverage(shape: np.ndarray,
+              act: np.ndarray,
+              area: float,
+              radius: float,
+              vx: float,
+              vy: float) -> float:
+    """실측 마스크가 설계 PAD 를 얼마나 덮는지. 두 방식 중 큰 값을 쓴다.
+
+      full : 설계 PAD 전체 대비        -> 실물 PAD 가 설계보다 작을 때 강함
+      excl : VIA 자리를 뺀 영역 대비   -> VIA 구멍이 뚫려 있을 때 강함
+
+    실물 이미지에서는 VIA 가 이진화 마스크에 구멍으로 남는다. full 만 보면 그 구멍
+    때문에 멀쩡한 PAD 가 PAD_ABSENT 로 빠지므로, VIA 가 있어야 할 자리를 제외하고
+    한 번 더 잰다. 구멍을 메우지 않고도 구멍의 영향을 없앨 수 있다.
+    """
+    hit = (shape > 0) & (act > 0)
+    full = float(np.count_nonzero(hit)) / area if area > 0 else 0.0
+
+    ex = np.zeros(shape.shape, np.uint8)
+    cv2.circle(ex, (int(round(vx)), int(round(vy))),
+               max(2, int(round(radius * VIA_EXCLUDE_RATIO))), 255, -1)
+    ref = (shape > 0) & (ex == 0)
+    n = np.count_nonzero(ref)
+    excl = float(np.count_nonzero(ref & hit)) / n if n else 0.0
+
+    return max(full, excl)
 
 
 def _find_via(roi: np.ndarray,
@@ -476,9 +595,9 @@ def _print_table(code: str, rows: List[Dict[str, Any]]) -> None:
         return
 
     head = ("PAD", "판정", "PAD중심", "VIA중심", "편심px", "편심비율",
-            "허용", "VIA면적", "PAD밝기", "덮임")
-    print("%4s %-12s %-16s %-16s %7s %9s %7s %8s %8s %6s" % head)
-    print("-" * 104)
+            "허용", "VIA면적", "PAD밝기", "덮임", "정합이동")
+    print("%4s %-12s %-16s %-16s %7s %9s %7s %8s %8s %6s %12s" % head)
+    print("-" * 118)
 
     def pt(v):
         return "-" if v is None else "(%.1f,%.1f)" % (v[0], v[1])
@@ -488,8 +607,9 @@ def _print_table(code: str, rows: List[Dict[str, Any]]) -> None:
 
     for r in rows:
         flag = "NG" if r["status"] in ("VIA_OFFSET", "VIA_MISSING") else "  "
-        print("%4d %-12s %-16s %-16s %7s %9s %7s %8s %8s %6s %s" % (
+        print("%4d %-12s %-16s %-16s %7s %9s %7s %8s %8s %6s %12s %s" % (
             r["pad_id"], r["status"], pt(r["pad_center"]), pt(r["via_center"]),
             num(r["offset_px"]), num(r["offset_norm"], "%.4f"),
             "%.2f" % OFFSET_TOL, num(r["via_area"], "%d"),
-            num(r["pad_median"], "%.1f"), num(r["pad_coverage"], "%.2f"), flag))
+            num(r["pad_median"], "%.1f"), num(r["pad_coverage"], "%.2f"),
+            pt(r["align_shift"]), flag))
