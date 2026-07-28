@@ -301,18 +301,54 @@ VIA 설계도의 각 연결요소 무게중심이 어느 설계 PAD 안에 있�
 설계상 VIA 가 없는 PAD 는 아예 건드리지 않습니다.
 
 ```python
-from via_checker import check_via, draw_via_result
+from via_checker import check_via
 
-res = check_via("board.png", "board_bin.png", "pad_cad.png", "via_cad.png")
+code, result = check_via("board.png", "board_bin.png", "pad_cad.png", "via_cad.png")
 
-print(res.code)          # "1" / "99" / "-1"
-print(res.summary())     # code=1  target=13  {OK=13}
-
-for f in res.findings:
-    print(f["pad_id"], f["status"], f.get("offset_norm"))
-
-img = draw_via_result(res)    # 결과 이미지
+# code   : "1" 양품 / "99" VIA 불량 / "-1" 입력 오류(result 는 None)
+# result : 원본과 같은 해상도의 결과 이미지 (ndarray)
 ```
+
+함수 하나, 인자 4개, 반환 2개가 전부입니다. 설정 객체·플래그·CLI 인자 없음,
+JSON 도 파일 저장도 하지 않습니다. 저장이 필요하면 호출한 쪽에서 `cv2.imwrite` 하면 됩니다.
+
+### 디버깅
+
+수치가 궁금하면 `debug_via` 를 쓰세요. 인자는 똑같고 반환만 하나 늘어납니다.
+
+```python
+from via_checker import debug_via
+
+code, result, rows = debug_via("board.png", "board_bin.png", "pad_cad.png", "via_cad.png")
+```
+
+- PAD 별 수치가 표로 출력됩니다 (`quiet=True` 로 끄기)
+- 결과 이미지에 **PAD 번호**가 함께 그려집니다
+- `rows` 로 원시값을 직접 받습니다
+
+```
+code=99   검사대상 7개   OK=4  VIA_MISSING=1  VIA_OFFSET=2
+ PAD 판정           PAD중심            VIA중심               편심px      편심비율      허용    VIA면적    PAD밝기     덮임
+--------------------------------------------------------------------------------------------------------
+   3 VIA_OFFSET   (21.8,75.4)      (25.8,76.0)         4.05    0.5181    0.25       20    107.0   0.81 NG
+   4 VIA_OFFSET   (52.1,75.3)      (55.4,73.1)         3.93    0.5058    0.25       19    107.0   0.76 NG
+   5 OK           (99.5,98.6)      (99.7,98.8)         0.24    0.0083    0.25       80    130.0   1.00
+   6 VIA_MISSING  (178.2,98.4)     -                      -         -    0.25        -    130.0   1.00 NG
+   9 OK           (52.1,107.3)     (52.4,107.9)        0.60    0.0756    0.25       17    102.0   0.95
+```
+
+`rows` 의 각 원소 키:
+
+| 키 | 내용 |
+|---|---|
+| `pad_id` | 결과 이미지에 찍힌 번호와 동일 |
+| `status` | `OK` / `VIA_OFFSET` / `VIA_MISSING` / `PAD_ABSENT` |
+| `pad_center`, `pad_radius`, `pad_area` | 설계 PAD 기하 |
+| `pad_coverage` | 실측 마스크가 설계 PAD 를 덮은 비율 |
+| `design_via` | VIA 설계 좌표 |
+| `via_center`, `via_area` | 검출된 실물 VIA (없으면 `None`) |
+| `offset_px`, `offset_norm` | 편심 절대/상대값 |
+| `pad_median`, `dark_threshold` | 어둡기 임계 계산 근거 |
 
 ### 판정
 
@@ -323,39 +359,30 @@ img = draw_via_result(res)    # 결과 이미지
 | 있음 | 없음 | `VIA_MISSING` | `"99"` |
 | 있음 | 실물 PAD 자체가 없음 | `PAD_ABSENT` | code 에 반영 안 함 |
 
-`PAD_ABSENT` 는 실측 이진 마스크가 설계 PAD 영역을 `pad_present_coverage`(기본 0.55) 만큼도
+`PAD_ABSENT` 는 실측 이진 마스크가 설계 PAD 영역을 `PAD_PRESENT_MIN`(기본 0.55) 만큼도
 덮지 못한 경우입니다. PAD 가 없으면 VIA 가 없는 것이 당연하므로 VIA 불량으로 세지 않습니다.
 (PAD 누락은 `"24"` 영역 — `pad_via_inspector.py` 담당)
 
-### 자주 건드리는 설정
+### 튜닝
+
+설정 객체 대신 **파일 상단의 모듈 상수**를 직접 고칩니다. 전부 한자리에 모여 있습니다.
 
 ```python
-from via_checker import ViaCheckConfig
-
-cfg = ViaCheckConfig(
-    design_pad_dilate = 2,       # 설계 PAD 가 실물보다 작게 그려진 만큼 되돌림 (0=그대로)
-    via_offset_tol    = 0.25,    # 반지름 대비 허용 편심 (스케일 불변)
-    via_offset_min_px = 2.2,     # 절대 허용 편심(px)
-    center_ref        = "pad",   # "pad"=설계 PAD 중심(정중앙) / "design_via"=VIA 설계 좌표
-    check_pad_present = True,
-)
-res = check_via(img, binm, padm, viam, cfg=cfg)
-
-# PAD 픽셀 크기가 다른 실이미지라면 배율만 넘기면 됩니다 (면적 s², 길이 s 자동 보정)
-cfg = ViaCheckConfig().scaled(실제_PAD_등가반지름 / 6.0)
+DESIGN_PAD_SHRINK = 2     # 설계 PAD 가 실물보다 작게 그려진 px (같게 그렸으면 0)
+OFFSET_TOL        = 0.25  # 반지름 대비 허용 편심 (스케일 불변)
+OFFSET_MIN_PX     = 2.2   # 절대 허용 편심 px (작은 PAD 반올림 오차 흡수)
+DARK_RATIO        = 0.62  # VIA 후보 = PAD 밝기 중앙값 * 이 값보다 어두운 픽셀
+PAD_PRESENT_MIN   = 0.55  # 실물 PAD 존재 판정 커버리지
 ```
+
+임계값이 **반지름·면적·밝기 중앙값에 대한 비율**로 잡혀 있어서 PAD 픽셀 크기가 달라져도
+그대로 씁니다. 검사 대상을 설계도로 정하므로 크기 기반 대상 선별이 아예 없습니다.
+(x2 확대 이미지에서 그대로 동작하는 것을 확인했습니다.)
 
 ### 결과 이미지
 
-**함수 하나**로 받습니다. 원본을 다시 넘기거나 플래그를 켤 필요가 없습니다.
-
-```python
-res = check_via(img, binm, padm, viam)
-cv2.imwrite("out.png", draw_via_result(res))
-```
-
-원본 이미지는 `res.source` 에 들어 있어 `draw_via_result` 가 알아서 씁니다.
-원본과 같은 해상도에 **PAD 하나당 마커 하나**만 그립니다 (텍스트·여백 없음, 원본은 변형하지 않음).
+`check_via` 가 두 번째 반환값으로 바로 줍니다. 원본과 같은 해상도에
+**PAD 하나당 마커 하나**만 그립니다 (텍스트·여백 없음, 원본 ndarray 는 변형하지 않음).
 
 | 판정 | 마커 |
 |---|---|
@@ -364,14 +391,7 @@ cv2.imwrite("out.png", draw_via_result(res))
 | `VIA_MISSING` | 빨강 X |
 | `PAD_ABSENT` | 회색 원 |
 
-마커가 마음에 안 들면 `draw_via_result` 를 참고해 직접 그리면 됩니다.
-판정에 필요한 좌표는 전부 `res.findings` 의 `pad_center` / `via_center` / `pad_radius` 에 들어 있습니다.
-
-### 단독 실행
-
-```bash
-python via_checker.py board.png board_bin.png pad_cad.png via_cad.png --out result.png
-```
+마커가 마음에 안 들면 `rows` 의 `pad_center` / `via_center` / `pad_radius` 로 직접 그리면 됩니다.
 
 ### 검증
 
