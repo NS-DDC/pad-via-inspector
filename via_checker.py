@@ -39,16 +39,16 @@ pad_via_inspector.py 에서 VIA 판정 로직만 떼어내, 이미 준비된 4�
 --------------------------------------------------------------------------
 사용 예
 --------------------------------------------------------------------------
-    from via_checker import check_via, ViaCheckConfig
+    from via_checker import check_via, draw_via_result, ViaCheckConfig
 
     res = check_via("board.png", "board_bin.png", "pad_cad.png", "via_cad.png")
     print(res.code)        # "1" / "99" / "-1"
     for f in res.findings:
         print(f["pad_id"], f["status"], f.get("offset_norm"))
 
-    # 결과 이미지까지 필요하면
-    res = check_via(img, binm, padm, viam, draw=True)
-    cv2.imwrite("out.png", res.overlay)      # 원본 해상도, 마커만 그려짐
+    # 결과 이미지 - 원본을 다시 넘기거나 플래그를 켤 필요 없이 함수 하나로 끝
+    img = draw_via_result(res)
+    cv2.imwrite("out.png", img)              # 원본 해상도, 마커만 그려짐
 
     # 이 저장소(PAD 등가반지름 약 6px)보다 큰 실이미지라면 배율 보정
     cfg = ViaCheckConfig().scaled(실제_PAD_등가반지름 / 6.0)
@@ -151,7 +151,7 @@ class ViaCheckResult:
     defects    : 불량 항목만 추린 목록
     via_mask   : 검출된 VIA 픽셀 마스크 (원본 해상도, 0/255)
     target_pad_ids : 검사 대상이 된 설계 PAD id 목록
-    overlay    : draw=True 일 때만 채워지는 결과 이미지 (원본 해상도)
+    source     : 원본 이미지(BGR). draw_via_result(res) 가 알아서 쓴다
     message    : 오류 메시지 (code == "-1" 일 때)
     """
     code: str
@@ -159,7 +159,7 @@ class ViaCheckResult:
     defects: List[Dict[str, Any]]
     via_mask: Optional[np.ndarray] = None
     target_pad_ids: Optional[List[int]] = None
-    overlay: Optional[np.ndarray] = None
+    source: Optional[np.ndarray] = None
     message: str = ""
 
     @property
@@ -191,17 +191,18 @@ def _imread_unicode(path: str, flags: int = cv2.IMREAD_COLOR) -> Optional[np.nda
     return cv2.imdecode(buf, flags)
 
 
-def _as_gray(src: Union[str, np.ndarray], name: str) -> np.ndarray:
+def _as_bgr(src: Union[str, np.ndarray], name: str) -> np.ndarray:
+    """무엇이 들어와도 uint8 3채널 BGR 로 정규화."""
     if isinstance(src, np.ndarray):
         img = src
     else:
         img = _imread_unicode(str(src), cv2.IMREAD_COLOR)
         if img is None:
             raise ValueError("%s를 읽을 수 없습니다: %s" % (name, src))
-    if img.ndim == 3:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     if img.dtype != np.uint8:
         img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     return img
 
 
@@ -377,8 +378,7 @@ def check_via(image: Union[str, np.ndarray],
               bin_mask: Union[str, np.ndarray],
               pad_design: Union[str, np.ndarray],
               via_design: Union[str, np.ndarray],
-              cfg: Optional[ViaCheckConfig] = None,
-              draw: bool = False) -> ViaCheckResult:
+              cfg: Optional[ViaCheckConfig] = None) -> ViaCheckResult:
     """VIA 설계도에 VIA 가 있는 PAD 만 골라 VIA 존재/편심을 검사한다.
 
     image      : 원본 이미지 (BGR/GRAY ndarray 또는 경로)
@@ -386,20 +386,21 @@ def check_via(image: Union[str, np.ndarray],
     pad_design : PAD 설계도 (이진)
     via_design : VIA 설계도 (이진)
     cfg        : ViaCheckConfig
-    draw       : True 면 result.overlay 에 원본 해상도 결과 이미지를 채운다
 
     반환 : ViaCheckResult (code = "1" / "99" / "-1")
+           결과 이미지는 draw_via_result(res) 로 받는다.
     """
     cfg = cfg or ViaCheckConfig()
 
     try:
-        gray = _as_gray(image, "원본 이미지")
+        src = _as_bgr(image, "원본 이미지")
         actual = _as_mask(bin_mask, "이진화 이미지")
         pdes = _as_mask(pad_design, "PAD 설계도")
         vdes = _as_mask(via_design, "VIA 설계도")
     except ValueError as e:
         return ViaCheckResult(code=CODE_ERROR, findings=[], defects=[], message=str(e))
 
+    gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
     H, W = gray.shape[:2]
     for nm, m in (("이진화 이미지", actual), ("PAD 설계도", pdes), ("VIA 설계도", vdes)):
         if m.shape[:2] != (H, W):
@@ -522,11 +523,8 @@ def check_via(image: Union[str, np.ndarray],
             findings.append(rec)
 
     code = CODE_VIA_DEFECT if defects else CODE_OK
-    res = ViaCheckResult(code=code, findings=findings, defects=defects,
-                         via_mask=via_mask, target_pad_ids=target_ids)
-    if draw:
-        res.overlay = draw_via_result(image, res)
-    return res
+    return ViaCheckResult(code=code, findings=findings, defects=defects,
+                          via_mask=via_mask, target_pad_ids=target_ids, source=src)
 
 
 # ----------------------------------------------------------------------------
@@ -538,22 +536,22 @@ _C_MISSING = (0, 0, 255)     # 빨강   : VIA 없음
 _C_ABSENT = (150, 150, 150)  # 회색   : PAD 자체가 없음
 
 
-def draw_via_result(image: Union[str, np.ndarray],
-                    res: ViaCheckResult) -> np.ndarray:
-    """원본 해상도 위에 마커만 그린 결과 이미지를 만든다 (텍스트 바 없음).
+def draw_via_result(res: ViaCheckResult) -> np.ndarray:
+    """결과 이미지를 만든다. 인자는 결과 객체 하나뿐이다.
 
-    정상    : 초록 원(PAD) + 초록 점(VIA)
-    편심    : 주황 원 + PAD중심 -> VIA중심 화살표
-    VIA없음 : 빨강 X
-    PAD없음 : 회색 원
+        img = draw_via_result(check_via(image, binm, padm, viam))
+
+    원본 이미지는 res.source 에 들어 있으므로 다시 넘길 필요가 없다.
+    원본과 동일한 해상도에 PAD 하나당 마커 하나만 그린다 (텍스트·여백 없음).
+
+        정상    : 초록 원
+        편심    : 주황 원 + PAD중심 -> VIA중심 화살표
+        VIA없음 : 빨강 X
+        PAD없음 : 회색 원
     """
-    if isinstance(image, np.ndarray):
-        base = image
-    else:
-        base = _imread_unicode(str(image), cv2.IMREAD_COLOR)
-        if base is None:
-            raise ValueError("원본 이미지를 읽을 수 없습니다: %s" % image)
-    out = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR) if base.ndim == 2 else base.copy()
+    if res.source is None:
+        raise ValueError("결과에 원본 이미지가 없습니다 (code=%s)." % res.code)
+    out = res.source.copy()
 
     for f in res.findings:
         if f.get("pad_center") is None:
@@ -564,8 +562,6 @@ def draw_via_result(image: Union[str, np.ndarray],
 
         if st == "OK":
             cv2.circle(out, (px, py), r, _C_OK, 1, cv2.LINE_AA)
-            vx, vy = f["via_center"]
-            cv2.circle(out, (int(round(vx)), int(round(vy))), 1, _C_OK, -1, cv2.LINE_AA)
         elif st == "VIA_OFFSET":
             cv2.circle(out, (px, py), r, _C_OFFSET, 1, cv2.LINE_AA)
             vx, vy = int(round(f["via_center"][0])), int(round(f["via_center"][1]))
@@ -600,13 +596,12 @@ def _main() -> int:
     if args.scale != 1.0:
         cfg = cfg.scaled(args.scale)
 
-    res = check_via(args.image, args.bin, args.pad_design, args.via_design,
-                    cfg=cfg, draw=bool(args.out))
+    res = check_via(args.image, args.bin, args.pad_design, args.via_design, cfg=cfg)
     print(json.dumps({"code": res.code,
                       "summary": res.summary(),
                       "defects": res.defects}, ensure_ascii=False, indent=2))
-    if args.out and res.overlay is not None:
-        ok, buf = cv2.imencode(".png", res.overlay)
+    if args.out and res.code != CODE_ERROR:
+        ok, buf = cv2.imencode(".png", draw_via_result(res))
         if ok:
             buf.tofile(args.out)
             print("saved:", args.out)

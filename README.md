@@ -301,15 +301,17 @@ VIA 설계도의 각 연결요소 무게중심이 어느 설계 PAD 안에 있�
 설계상 VIA 가 없는 PAD 는 아예 건드리지 않습니다.
 
 ```python
-from via_checker import check_via, ViaCheckConfig
+from via_checker import check_via, draw_via_result
 
 res = check_via("board.png", "board_bin.png", "pad_cad.png", "via_cad.png")
 
-print(res.code)        # "1" / "99" / "-1"
-print(res.summary())   # code=1  target=13  {OK=13}
+print(res.code)          # "1" / "99" / "-1"
+print(res.summary())     # code=1  target=13  {OK=13}
 
 for f in res.findings:
     print(f["pad_id"], f["status"], f.get("offset_norm"))
+
+img = draw_via_result(res)    # 결과 이미지
 ```
 
 ### 판정
@@ -328,6 +330,8 @@ for f in res.findings:
 ### 자주 건드리는 설정
 
 ```python
+from via_checker import ViaCheckConfig
+
 cfg = ViaCheckConfig(
     design_pad_dilate = 2,       # 설계 PAD 가 실물보다 작게 그려진 만큼 되돌림 (0=그대로)
     via_offset_tol    = 0.25,    # 반지름 대비 허용 편심 (스케일 불변)
@@ -343,12 +347,25 @@ cfg = ViaCheckConfig().scaled(실제_PAD_등가반지름 / 6.0)
 
 ### 결과 이미지
 
+**함수 하나**로 받습니다. 원본을 다시 넘기거나 플래그를 켤 필요가 없습니다.
+
 ```python
-res = check_via(img, binm, padm, viam, draw=True)
-cv2.imwrite("out.png", res.overlay)   # 원본 해상도, 마커만
+res = check_via(img, binm, padm, viam)
+cv2.imwrite("out.png", draw_via_result(res))
 ```
 
-정상 = 초록 원 + 초록 점 / 편심 = 주황 화살표 / VIA 없음 = 빨강 X / PAD 없음 = 회색 원
+원본 이미지는 `res.source` 에 들어 있어 `draw_via_result` 가 알아서 씁니다.
+원본과 같은 해상도에 **PAD 하나당 마커 하나**만 그립니다 (텍스트·여백 없음, 원본은 변형하지 않음).
+
+| 판정 | 마커 |
+|---|---|
+| `OK` | 초록 원 |
+| `VIA_OFFSET` | 주황 원 + PAD중심 → VIA중심 화살표 |
+| `VIA_MISSING` | 빨강 X |
+| `PAD_ABSENT` | 회색 원 |
+
+마커가 마음에 안 들면 `draw_via_result` 를 참고해 직접 그리면 됩니다.
+판정에 필요한 좌표는 전부 `res.findings` 의 `pad_center` / `via_center` / `pad_radius` 에 들어 있습니다.
 
 ### 단독 실행
 
