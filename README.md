@@ -289,10 +289,11 @@ mask = build_via_design_mask((220, 220), [(150.5, 32.1), (180.6, 32.1)], radius=
 `pad_via_inspector.py` 없이 **이 파일 하나만** 다른 프로젝트에 붙여 넣으면 됩니다.
 
 ```
-   원본 이미지 ─┐
-   이진화 마스크 ─┤                             ┌─→ code   "1" / "42" / "99" / "-1"
-   PAD 설계도  ─┤──→  check_via(4개)  ──────┤
-   VIA 설계도  ─┘                             └─→ result  마커가 그려진 결과 이미지
+   원본 이미지 ─┐                             ┌─→ code     "1" / "42" / "99" / "-1"
+   이진화 마스크 ─┤                             │
+   PAD 설계도  ─┤──→  check_via(4개)  ──────┼─→ result   마커가 그려진 결과 이미지
+   VIA 설계도  ─┘                             │
+                                              └─→ via_bin  검출한 VIA 의 이진화 마스크
 ```
 
 | code | 뜻 | 마커 |
@@ -300,7 +301,7 @@ mask = build_via_design_mask((220, 220), [(150.5, 32.1), (180.6, 32.1)], radius=
 | `"1"` | 양품 | 초록 원 |
 | `"42"` | **VIA 없음** | 빨강 X |
 | `"99"` | **VIA 쏠림** | 주황 원 + 편심 화살표 |
-| `"-1"` | 입력 오류 (`result` 는 `None`) | — |
+| `"-1"` | 입력 오류 (`result`·`via_bin` 모두 `None`) | — |
 
 ### 입력 4개
 
@@ -322,28 +323,73 @@ VIA 설계도의 각 연결요소 무게중심이 어느 설계 PAD 안에 있�
 ```python
 from via_checker import check_via
 
-code, result = check_via("board.png", "board_bin.png", "pad_cad.png", "via_cad.png")
+code, result, via_bin = check_via("board.png", "board_bin.png",
+                                  "pad_cad.png", "via_cad.png")
 
-# code   : "1"  양품
-#          "42" VIA 없음
-#          "99" VIA 쏠림
-#          "-1" 입력 오류 (result 는 None)
-# result : 원본과 같은 해상도의 결과 이미지 (ndarray)
+# code    : "1"  양품
+#           "42" VIA 없음
+#           "99" VIA 쏠림
+#           "-1" 입력 오류 (result, via_bin 모두 None)
+# result  : 원본과 같은 해상도의 결과 이미지 (ndarray, BGR)
+# via_bin : 검출한 VIA 의 이진화 마스크 (ndarray, 0/255 단일채널)
 ```
 
 한 이미지에 없음과 쏠림이 같이 있으면 **`"42"` 가 이깁니다** (결손이 위치오차보다 중대).
 
-함수 하나, 인자 4개, 반환 2개가 전부입니다. 설정 객체·플래그·CLI 인자 없음,
+함수 하나, 인자 4개, 반환 3개가 전부입니다. 설정 객체·플래그·CLI 인자 없음,
 JSON 도 파일 저장도 하지 않습니다. 저장이 필요하면 호출한 쪽에서 `cv2.imwrite` 하면 됩니다.
+
+### 반환 3 — `via_bin` (검출한 VIA 의 이진화 마스크)
+
+**판정의 근거가 된 VIA 픽셀 그 자체**입니다. 원본과 같은 해상도의 0/255 단일채널.
+
+```
+   원본 이미지                     via_bin
+   ┌──────────────┐               ┌──────────────┐
+   │ ▓▓▓▓   ▓▓▓▓ │               │              │
+   │ ▓▓○▓   ▓▓ ▓▓ │   ──────→     │   ▪          │   ← 찾은 것만 흰색
+   │ ▓▓▓▓   ▓▓▓▓ │               │              │      (오른쪽은 VIA 없음)
+   └──────────────┘               └──────────────┘
+```
+
+무엇이 들어가고 무엇이 빠지는지가 중요합니다.
+
+| | via_bin 에 |
+|---|---|
+| VIA 로 **채택한** 덩어리 | ✔ 들어감 |
+| `VIA_MISSING` 인 PAD | ✘ 아무것도 안 찍힘 |
+| `PAD_ABSENT` 인 PAD | ✘ 아무것도 안 찍힘 |
+| 후보였다가 **면적 조건에서 탈락**한 덩어리 | ✘ 안 찍힘 |
+| 검사 대상이 아닌 PAD (설계에 VIA 점 없음) | ✘ 안 건드림 |
+
+즉 **흰 픽셀 = 이 판정의 근거**입니다. 후보 화소를 그대로 흘려보내지 않으므로
+"왜 이렇게 판정했나"를 따로 재현할 필요가 없습니다.
+
+```python
+import cv2
+n_via = cv2.connectedComponents(via_bin)[0] - 1      # 검출된 VIA 개수
+cv2.imwrite("via_bin.png", via_bin)                  # 저장은 호출한 쪽에서
+```
+
+44장 실측 검증 — `via_bin` 의 덩어리와 판정 결과가 **정확히 1:1** 로 대응합니다.
+
+| 항목 | 결과 |
+|---|---|
+| 덩어리 개수 vs VIA 검출 PAD 수 | **746 = 746** (불일치 0) |
+| 짝 없는 유령 덩어리 | **0개** |
+| 덩어리 무게중심 vs `via_center` | 최대 오차 **0.38px** |
+| 정답 VIA 좌표 ±3px 안에 흰 픽셀 | **746 / 746** |
+| VIA 없는 PAD 자리(±8px)에 흰 픽셀 | **0 / 26** |
 
 ### 디버깅
 
-수치가 궁금하면 `debug_via` 를 쓰세요. 인자는 똑같고 반환만 하나 늘어납니다.
+수치가 궁금하면 `debug_via` 를 쓰세요. 인자는 똑같고 `rows` 하나만 더 붙습니다.
 
 ```python
 from via_checker import debug_via
 
-code, result, rows = debug_via("board.png", "board_bin.png", "pad_cad.png", "via_cad.png")
+code, result, via_bin, rows = debug_via("board.png", "board_bin.png",
+                                        "pad_cad.png", "via_cad.png")
 ```
 
 - PAD 별 수치가 표로 출력됩니다 (`quiet=True` 로 끄기)
@@ -588,8 +634,10 @@ ALIGN_MIN_COVER   = 0.30  # 창 안 실측 픽셀이 이 비율 미만이면 정
 
 ### 결과 이미지
 
-`check_via` 가 두 번째 반환값으로 바로 줍니다. 원본과 같은 해상도에
+`check_via` 의 **두 번째 반환값**(`result`)이 이것입니다. 원본과 같은 해상도에
 **PAD 하나당 마커 하나**만 그립니다 (텍스트·여백 없음, 원본 ndarray 는 변형하지 않음).
+
+> 사람이 보는 용도는 `result`, 다음 공정에 넘기는 용도는 **세 번째 반환값** `via_bin` 입니다.
 
 | 판정 | 마커 |
 |---|---|

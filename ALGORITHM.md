@@ -590,6 +590,11 @@ else:
 
 `ViaResult(via_mask, findings, defects, target_pad_ids)`
 
+`via_mask` 는 원본과 같은 해상도의 0/255 단일채널 이미지로, **채택한 VIA 덩어리만**
+흰색입니다. VIA 를 못 찾은 PAD, 대상이 아닌 PAD, 면적 조건에서 탈락한 후보는
+아무것도 안 찍히므로 흰 픽셀 = 판정 근거가 된 VIA 그 자체입니다.
+(`via_checker.py` 도 같은 것을 세 번째 반환값 `via_bin` 으로 줍니다.)
+
 `findings` 는 PAD 하나당 dict 하나로, 판정 근거 수치를 전부 담습니다.
 
 ```python

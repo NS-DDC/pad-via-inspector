@@ -5,18 +5,19 @@
 
     from via_checker import check_via
 
-    code, result = check_via(원본, 이진화, PAD설계도, VIA설계도)
+    code, result, via_bin = check_via(원본, 이진화, PAD설계도, VIA설계도)
 
-    #  code   : "1"  양품
-    #           "42" VIA 없음        (둘 다면 42 가 우선)
-    #           "99" VIA 쏠림
-    #           "-1" 입력 오류 (이때 result 는 None)
-    #  result : 원본과 같은 해상도의 결과 이미지
+    #  code    : "1"  양품
+    #            "42" VIA 없음        (둘 다면 42 가 우선)
+    #            "99" VIA 쏠림
+    #            "-1" 입력 오류 (이때 result 와 via_bin 은 None)
+    #  result  : 원본과 같은 해상도의 결과 이미지
+    #  via_bin : 검출한 VIA 의 이진화 마스크 (원본과 같은 해상도, 0/255 단일채널)
 
 디버깅할 때는 debug_via 를 쓰세요. PAD 별 수치가 표로 찍히고
 결과 이미지에는 PAD 번호가 함께 그려집니다.
 
-    code, result, rows = debug_via(원본, 이진화, PAD설계도, VIA설계도)
+    code, result, via_bin, rows = debug_via(원본, 이진화, PAD설계도, VIA설계도)
 
     for r in rows:
         print(r["pad_id"], r["status"], r["offset_norm"])
@@ -31,6 +32,21 @@
 
   네 장 모두 같은 해상도·같은 좌표계여야 합니다.
   크기가 다르면 조용히 리사이즈하지 않고 "-1" 로 실패합니다.
+
+--------------------------------------------------------------------------
+출력 via_bin - 검출한 VIA 의 이진화 마스크
+--------------------------------------------------------------------------
+  원본과 같은 해상도의 0/255 단일채널 이미지입니다.
+  '검사 대상 PAD 안에서 VIA 로 채택한 덩어리' 만 흰색으로 남습니다.
+
+    - VIA 를 못 찾은 PAD(VIA_MISSING) 와 PAD_ABSENT 는 아무것도 안 찍힙니다.
+    - 후보였다가 면적 조건에서 탈락한 덩어리도 안 찍힙니다.
+      즉 흰 픽셀 = 이 판정의 근거가 된 VIA 그 자체입니다.
+
+  판정 근거를 눈으로 확인하거나 다음 공정에 넘길 때 쓰세요.
+
+    code, result, via_bin = check_via(...)
+    print(cv2.connectedComponents(via_bin)[0] - 1)   # 검출된 VIA 개수
 
 --------------------------------------------------------------------------
 검사 대상
@@ -159,20 +175,21 @@ def check_via(image: Union[str, np.ndarray],
               bin_mask: Union[str, np.ndarray],
               pad_design: Union[str, np.ndarray],
               via_design: Union[str, np.ndarray]
-              ) -> Tuple[str, Optional[np.ndarray]]:
-    """이미지 4장을 받아 (코드, 결과이미지) 를 돌려준다.
+              ) -> Tuple[str, Optional[np.ndarray], Optional[np.ndarray]]:
+    """이미지 4장을 받아 (코드, 결과이미지, VIA이진화) 를 돌려준다.
 
-        code, result = check_via(원본, 이진화, PAD설계도, VIA설계도)
+        code, result, via_bin = check_via(원본, 이진화, PAD설계도, VIA설계도)
 
     code 는 "1"(양품) / "42"(VIA 없음) / "99"(VIA 쏠림) / "-1"(입력 오류) 중 하나입니다.
     한 이미지에 없음과 쏠림이 같이 있으면 "42" 가 우선합니다.
-    "-1" 이면 result 는 None 이고, 이유가 표준에러로 출력됩니다.
+    via_bin 은 검출한 VIA 만 흰색인 0/255 마스크입니다 (원본과 같은 해상도).
+    "-1" 이면 result 와 via_bin 은 None 이고, 이유가 표준에러로 출력됩니다.
     """
-    code, src, rows, err = _run(image, bin_mask, pad_design, via_design)
+    code, src, via_bin, rows, err = _run(image, bin_mask, pad_design, via_design)
     if code == CODE_ERROR:
         sys.stderr.write("[via_checker] %s\n" % err)
-        return CODE_ERROR, None
-    return code, _draw(src, rows, numbering=False)
+        return CODE_ERROR, None, None
+    return code, _draw(src, rows, numbering=False), via_bin
 
 
 def debug_via(image: Union[str, np.ndarray],
@@ -180,10 +197,13 @@ def debug_via(image: Union[str, np.ndarray],
               pad_design: Union[str, np.ndarray],
               via_design: Union[str, np.ndarray],
               quiet: bool = False
-              ) -> Tuple[str, Optional[np.ndarray], List[Dict[str, Any]]]:
+              ) -> Tuple[str, Optional[np.ndarray], Optional[np.ndarray],
+                         List[Dict[str, Any]]]:
     """check_via 와 같은 검사를 하되, 디버깅에 필요한 것을 함께 준다.
 
-        code, result, rows = debug_via(원본, 이진화, PAD설계도, VIA설계도)
+        code, result, via_bin, rows = debug_via(원본, 이진화, PAD설계도, VIA설계도)
+
+    앞 세 개는 check_via 와 같습니다. rows 만 추가됩니다.
 
     - PAD 별 수치를 표로 출력합니다 (quiet=True 로 끄기)
     - 결과 이미지에 PAD 번호를 함께 그립니다
@@ -195,14 +215,14 @@ def debug_via(image: Union[str, np.ndarray],
 
     align_shift 가 크게 나오면 설계도와 실물이 그만큼 어긋나 있다는 뜻입니다.
     """
-    code, src, rows, err = _run(image, bin_mask, pad_design, via_design)
+    code, src, via_bin, rows, err = _run(image, bin_mask, pad_design, via_design)
     if code == CODE_ERROR:
         if not quiet:
             print("code=-1  ERROR: %s" % err)
-        return CODE_ERROR, None, [{"status": "ERROR", "message": err}]
+        return CODE_ERROR, None, None, [{"status": "ERROR", "message": err}]
     if not quiet:
         _print_table(code, rows)
-    return code, _draw(src, rows, numbering=True), rows
+    return code, _draw(src, rows, numbering=True), via_bin, rows
 
 
 # ============================================================================
@@ -296,20 +316,21 @@ def _run(image: Union[str, np.ndarray],
          bin_mask: Union[str, np.ndarray],
          pad_design: Union[str, np.ndarray],
          via_design: Union[str, np.ndarray]
-         ) -> Tuple[str, Optional[np.ndarray], List[Dict[str, Any]], str]:
-    """반환 (code, 원본BGR, rows, 오류메시지)"""
+         ) -> Tuple[str, Optional[np.ndarray], Optional[np.ndarray],
+                    List[Dict[str, Any]], str]:
+    """반환 (code, 원본BGR, VIA이진화, rows, 오류메시지)"""
     try:
         src = _to_bgr(image, "원본 이미지")
         actual = _to_mask(bin_mask, "이진화 이미지")
         pdes = _to_mask(pad_design, "PAD 설계도")
         vdes = _to_mask(via_design, "VIA 설계도")
     except ValueError as e:
-        return CODE_ERROR, None, [], str(e)
+        return CODE_ERROR, None, None, [], str(e)
 
     H, W = src.shape[:2]
     for nm, m in (("이진화 이미지", actual), ("PAD 설계도", pdes), ("VIA 설계도", vdes)):
         if m.shape[:2] != (H, W):
-            return CODE_ERROR, None, [], (
+            return CODE_ERROR, None, None, [], (
                 "%s 크기%s가 원본 이미지 크기%s와 다릅니다." % (nm, m.shape[:2], (H, W)))
 
     gray = cv2.GaussianBlur(cv2.cvtColor(src, cv2.COLOR_BGR2GRAY), (3, 3), 0)
@@ -325,6 +346,9 @@ def _run(image: Union[str, np.ndarray],
                                     (2 * PAD_ERODE + 1, 2 * PAD_ERODE + 1))
     alk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
                                     (2 * ALIGN_MARGIN + 1, 2 * ALIGN_MARGIN + 1))
+
+    # 검출한 VIA 만 흰색으로 남길 마스크. PAD 마다 채택한 덩어리를 여기에 찍는다.
+    via_bin = np.zeros((H, W), np.uint8)
 
     rows: List[Dict[str, Any]] = []
     found_status = set()
@@ -391,6 +415,8 @@ def _run(image: Union[str, np.ndarray],
             rows.append(row)
             continue
 
+        via_bin[y0:y1, x0:x1][found["mask"]] = 255
+
         vx, vy = found["cx"] + x0, found["cy"] + y0
         dist = float(np.hypot(found["cx"] - cx, found["cy"] - cy))
         row["via_center"] = (round(vx, 2), round(vy, 2))
@@ -411,7 +437,7 @@ def _run(image: Union[str, np.ndarray],
         if c in found_status:
             code = c
             break
-    return code, src, rows, ""
+    return code, src, via_bin, rows, ""
 
 
 def _align(shape: np.ndarray,
@@ -486,6 +512,9 @@ def _find_via(roi: np.ndarray,
               row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """PAD 한 개 안에서 VIA 를 찾는다. 없으면 None.
 
+    찾으면 {"cx", "cy", "area", "mask"} 를 준다. mask 는 채택한 덩어리의
+    bool 배열(roi 와 같은 크기)로, 호출부에서 via_bin 에 찍는 데 쓴다.
+
     두 조건의 AND 로 찾는다.
       (1) 전역 : PAD 밝기 중앙값 * DARK_RATIO 보다 어두움
       (2) 국소 : Black-hat 응답이 큼 = 주변보다 움푹 들어간 고립된 우물
@@ -541,7 +570,7 @@ def _find_via(roi: np.ndarray,
     else:
         cx, cy = float(cents[best][0]), float(cents[best][1])
 
-    return {"cx": cx, "cy": cy, "area": best_area}
+    return {"cx": cx, "cy": cy, "area": best_area, "mask": blob}
 
 
 # ============================================================================
