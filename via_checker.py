@@ -11,8 +11,13 @@
     #            "42" VIA 없음        (둘 다면 42 가 우선)
     #            "99" VIA 쏠림
     #            "-1" 입력 오류 (이때 result 와 via_bin 은 None)
-    #  result  : 원본과 같은 해상도의 결과 이미지
+    #  result  : 원본과 같은 해상도의 결과 이미지 (찾아낸 VIA 도 하늘색 원으로 표기)
     #  via_bin : 검출한 VIA 의 이진화 마스크 (원본과 같은 해상도, 0/255 단일채널)
+
+PAD 표면 얼룩 때문에 엉뚱한 것을 VIA 로 잡으면 임계값을 내리세요.
+
+    code, result, via_bin = check_via(원본, 이진화, PAD설계도, VIA설계도,
+                                      dark_offset=-8)   # 더 어두운 것만 VIA 로 인정
 
 디버깅할 때는 debug_via 를 쓰세요. PAD 별 수치가 표로 찍히고
 결과 이미지에는 PAD 번호가 함께 그려집니다.
@@ -84,6 +89,34 @@
        excl : VIA 가 있어야 할 자리를 빼고 계산   <- 구멍에 영향 없음
      구멍 메우기(hole filling) 는 쓰지 않습니다.
 
+  3) "PAD 안 노이즈를 VIA 로 잘못 잡음"
+     PAD 표면의 긁힘 자국·얼룩도 어둡기 때문에 VIA 후보로 올라옵니다.
+     크기만 보면 진짜 VIA 보다 큰 경우가 많아 그냥 두면 이겨버립니다.
+     막는 방법이 두 가지입니다.
+
+     (a) 모양으로 거르기 (자동)
+         VIA 는 항상 원형입니다. 원이 아닌 덩어리는 뒤로 밀어둡니다.
+           장단비   > VIA_MAX_ASPECT      -> 길쭉함 (긁힘 자국은 1px 폭)
+           반경편차 > VIA_MAX_RADIAL_DEV  -> 흩어짐 (ㄴ자·대각선·부스러기)
+         실측으로 진짜 VIA 는 장단비 1.00~1.75 / 반경편차 0.211~0.317,
+         실물 노이즈는 장단비 4.0~7.0 / 반경편차 0.443~0.690 이라 잘 갈립니다.
+         몇 개를 밀어냈는지는 rows 의 shape_rejected 에 찍힙니다.
+
+         중요 : 이 조건은 '누가 VIA 인가' 를 고를 때만 씁니다.
+         'VIA 가 없다' 고 단정하는 데는 쓰지 않습니다. 원형 후보가 하나도
+         없으면 모양을 무시하고 가장 큰 것을 그냥 씁니다. 긁힘이 진짜 VIA 를
+         가로지르면 둘이 한 덩어리로 붙어 길쭉해지는데, 그때 탈락시키면
+         멀쩡한 PAD 가 VIA_MISSING 으로 둔갑하기 때문입니다.
+         즉 이 필터는 판정을 나쁘게 만들 수 없습니다.
+
+     (b) 어둡기로 거르기 (호출할 때 조절)
+         노이즈가 원형이라 (a) 로 안 걸리면 dark_offset 을 음수로 주세요.
+         임계 = PAD밝기중앙값 * DARK_RATIO + dark_offset  (1~254 로 묶임)
+
+         단, 이건 만능이 아닙니다. 얼룩이 진짜 VIA 만큼 어두우면 같이
+         사라집니다. 대비가 연한 VIA 를 쓰는 라인이라면 조금씩(-3, -5)
+         내리면서 debug_via 의 dark_threshold 와 판정을 같이 보세요.
+
 의존성 : numpy, opencv-python  (Python 3.9+)
 """
 
@@ -133,7 +166,22 @@ ALIGN_MARGIN = 2          # 무게중심을 잴 때 설계 PAD 를 몇 px 키운
 ALIGN_MIN_COVER = 0.30    # 창 안 실측 픽셀이 이 비율도 안 되면 정합 생략
 
 # VIA 후보 : PAD 밝기 중앙값 * DARK_RATIO 보다 어두운 픽셀
+# 최종 임계 = PAD밝기중앙값 * DARK_RATIO + dark_offset
+# dark_offset 은 함수 호출할 때 넘기는 인자입니다 (기본 0). 여기 상수는 안 고쳐도 됩니다.
 DARK_RATIO = 0.62
+
+# VIA 모양 조건 - VIA 는 항상 원형이므로 원이 아닌 덩어리는 후보에서 뺍니다.
+# 둘 다 크기와 무관한 무차원 값이라 이미지 배율이 바뀌어도 그대로 씁니다.
+#
+#   장단비   = 외접 사각형의 긴변 / 짧은변          (원 = 1.0)
+#   반경편차 = 중심까지 거리의 표준편차 / 등가반지름 (꽉 찬 원 = 0.236, 크기 무관)
+#
+# 실측 근거 (테스트셋 VIA 746개 / 실물 노이즈 이미지)
+#   진짜 VIA  : 장단비 1.00~1.75   반경편차 0.211~0.317
+#   실물 노이즈: 장단비 4.0~7.0    반경편차 0.443~0.690   <- 1px 폭 긁힘 자국
+# 두 분포 사이가 넓게 비어 있어서 그 가운데에 선을 그었습니다.
+VIA_MAX_ASPECT = 2.2        # 이보다 길쭉하면 탈락
+VIA_MAX_RADIAL_DEV = 0.45   # 이보다 흩어져 있으면 탈락 (ㄴ자·대각선·부스러기)
 
 # Black-hat (주변보다 움푹 들어간 곳만 남겨 PAD 테두리 오검출을 막는 필터)
 BLACKHAT_KSIZE_RATIO = 0.85   # 커널 크기 = PAD반지름 * 이 값 (VIA 보다 크고 PAD 보다 작게)
@@ -166,6 +214,7 @@ COLOR_OK = (0, 220, 0)          # 초록 : 정상
 COLOR_OFFSET = (0, 165, 255)    # 주황 : 쏠림
 COLOR_MISSING = (0, 0, 255)     # 빨강 : VIA 없음
 COLOR_ABSENT = (150, 150, 150)  # 회색 : PAD 없음
+COLOR_VIA = (255, 255, 0)       # 하늘 : 찾아낸 VIA 위치 (판정과 무관하게 항상 표기)
 
 
 # ============================================================================
@@ -174,7 +223,8 @@ COLOR_ABSENT = (150, 150, 150)  # 회색 : PAD 없음
 def check_via(image: Union[str, np.ndarray],
               bin_mask: Union[str, np.ndarray],
               pad_design: Union[str, np.ndarray],
-              via_design: Union[str, np.ndarray]
+              via_design: Union[str, np.ndarray],
+              dark_offset: float = 0.0
               ) -> Tuple[str, Optional[np.ndarray], Optional[np.ndarray]]:
     """이미지 4장을 받아 (코드, 결과이미지, VIA이진화) 를 돌려준다.
 
@@ -184,8 +234,19 @@ def check_via(image: Union[str, np.ndarray],
     한 이미지에 없음과 쏠림이 같이 있으면 "42" 가 우선합니다.
     via_bin 은 검출한 VIA 만 흰색인 0/255 마스크입니다 (원본과 같은 해상도).
     "-1" 이면 result 와 via_bin 은 None 이고, 이유가 표준에러로 출력됩니다.
+
+    dark_offset : VIA 를 찾는 밝기 임계값을 밝기 단위로 올리고 내립니다 (기본 0).
+
+        임계값 = PAD밝기중앙값 * 0.62 + dark_offset
+
+        음수  더 어두운 픽셀만 VIA 로 본다  -> 표면 얼룩에 안 속음 (노이즈 억제)
+        양수  덜 어두운 픽셀도 VIA 로 본다  -> 연한 VIA 를 놓치지 않음
+
+    한 번에 -20 씩 움직이지 말고 -5 정도씩 옮기면서 debug_via 의
+    dark_threshold 열을 보세요. 실제로 적용된 값이 그대로 찍힙니다.
     """
-    code, src, via_bin, rows, err = _run(image, bin_mask, pad_design, via_design)
+    code, src, via_bin, rows, err = _run(image, bin_mask, pad_design, via_design,
+                                         dark_offset)
     if code == CODE_ERROR:
         sys.stderr.write("[via_checker] %s\n" % err)
         return CODE_ERROR, None, None
@@ -196,7 +257,8 @@ def debug_via(image: Union[str, np.ndarray],
               bin_mask: Union[str, np.ndarray],
               pad_design: Union[str, np.ndarray],
               via_design: Union[str, np.ndarray],
-              quiet: bool = False
+              quiet: bool = False,
+              dark_offset: float = 0.0
               ) -> Tuple[str, Optional[np.ndarray], Optional[np.ndarray],
                          List[Dict[str, Any]]]:
     """check_via 와 같은 검사를 하되, 디버깅에 필요한 것을 함께 준다.
@@ -204,18 +266,21 @@ def debug_via(image: Union[str, np.ndarray],
         code, result, via_bin, rows = debug_via(원본, 이진화, PAD설계도, VIA설계도)
 
     앞 세 개는 check_via 와 같습니다. rows 만 추가됩니다.
+    dark_offset 도 check_via 와 같은 뜻입니다.
 
     - PAD 별 수치를 표로 출력합니다 (quiet=True 로 끄기)
     - 결과 이미지에 PAD 번호를 함께 그립니다
     - rows 는 PAD 별 dict 목록입니다. 들어있는 키:
         pad_id, status, pad_center, pad_radius, pad_area, pad_coverage,
         align_shift, design_via, via_center, via_area, offset_px, offset_norm,
-        pad_median, dark_threshold
+        pad_median, dark_threshold, via_aspect, via_radial_dev, shape_rejected
       (해당 없는 항목은 None)
 
     align_shift 가 크게 나오면 설계도와 실물이 그만큼 어긋나 있다는 뜻입니다.
+    shape_rejected 가 0 이 아니면 모양 조건에서 걸러낸 후보가 그만큼 있었다는 뜻입니다.
     """
-    code, src, via_bin, rows, err = _run(image, bin_mask, pad_design, via_design)
+    code, src, via_bin, rows, err = _run(image, bin_mask, pad_design, via_design,
+                                         dark_offset)
     if code == CODE_ERROR:
         if not quiet:
             print("code=-1  ERROR: %s" % err)
@@ -315,7 +380,8 @@ def _map_vias(via_design: np.ndarray,
 def _run(image: Union[str, np.ndarray],
          bin_mask: Union[str, np.ndarray],
          pad_design: Union[str, np.ndarray],
-         via_design: Union[str, np.ndarray]
+         via_design: Union[str, np.ndarray],
+         dark_offset: float = 0.0
          ) -> Tuple[str, Optional[np.ndarray], Optional[np.ndarray],
                     List[Dict[str, Any]], str]:
     """반환 (code, 원본BGR, VIA이진화, rows, 오류메시지)"""
@@ -396,6 +462,9 @@ def _run(image: Union[str, np.ndarray],
             "offset_norm": None,
             "pad_median": None,
             "dark_threshold": None,
+            "via_aspect": None,
+            "via_radial_dev": None,
+            "shape_rejected": 0,
         }
 
         # ---- 실물 PAD 가 그 자리에 있는지 ----
@@ -408,7 +477,7 @@ def _run(image: Union[str, np.ndarray],
             continue
 
         # ---- VIA 찾기 ----
-        found = _find_via(roi, shape, radius, ero, row)
+        found = _find_via(roi, shape, radius, ero, row, dark_offset)
         if found is None:
             row["status"] = "VIA_MISSING"
             found_status.add(CODE_VIA_MISSING)
@@ -421,6 +490,8 @@ def _run(image: Union[str, np.ndarray],
         dist = float(np.hypot(found["cx"] - cx, found["cy"] - cy))
         row["via_center"] = (round(vx, 2), round(vy, 2))
         row["via_area"] = int(found["area"])
+        row["via_aspect"] = round(found["aspect"], 2)
+        row["via_radial_dev"] = round(found["radial_dev"], 3)
         row["offset_px"] = round(dist, 2)
         row["offset_norm"] = round(dist / radius if radius > 1e-6 else 999.0, 4)
 
@@ -505,28 +576,60 @@ def _coverage(shape: np.ndarray,
     return max(full, excl)
 
 
+def _roundness(ys: np.ndarray, xs: np.ndarray) -> Tuple[float, float]:
+    """덩어리가 얼마나 '꽉 찬 원' 에 가까운지 두 숫자로 잰다.
+
+    반환 (장단비, 반경편차). 둘 다 크기와 무관한 무차원 값이라
+    이미지 배율이 바뀌어도 같은 임계값을 그대로 쓸 수 있다.
+
+      장단비   = 외접 사각형 긴변 / 짧은변
+                 원이면 1.0, 길쭉할수록 커진다. 긁힘·선 자국을 잡는다.
+
+      반경편차 = 중심까지 거리의 표준편차 / 등가반지름
+                 꽉 찬 원이면 크기와 상관없이 항상 0.236 이다.
+                 ㄴ자, 대각선, 흩어진 부스러기처럼 '외접 사각형은 정사각인데
+                 속이 안 찬' 모양을 잡는다. 장단비가 못 잡는 것을 담당한다.
+
+    (링 모양은 반경편차가 오히려 작아서 이 두 값으로는 안 걸러진다.
+     실물에서 나오는 노이즈가 아니라 일부러 다루지 않는다.)
+    """
+    w = float(xs.max() - xs.min() + 1)
+    h = float(ys.max() - ys.min() + 1)
+    aspect = max(w, h) / min(w, h)
+
+    d = np.hypot(xs - xs.mean(), ys - ys.mean())
+    equiv_r = np.sqrt(len(xs) / np.pi)
+    dev = float(d.std() / equiv_r) if equiv_r > 1e-6 else 0.0
+    return aspect, dev
+
+
 def _find_via(roi: np.ndarray,
               shape: np.ndarray,
               radius: float,
               ero: np.ndarray,
-              row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+              row: Dict[str, Any],
+              dark_offset: float) -> Optional[Dict[str, Any]]:
     """PAD 한 개 안에서 VIA 를 찾는다. 없으면 None.
 
-    찾으면 {"cx", "cy", "area", "mask"} 를 준다. mask 는 채택한 덩어리의
-    bool 배열(roi 와 같은 크기)로, 호출부에서 via_bin 에 찍는 데 쓴다.
+    찾으면 {"cx", "cy", "area", "mask", "aspect", "radial_dev"} 를 준다.
+    mask 는 채택한 덩어리의 bool 배열(roi 와 같은 크기)로,
+    호출부에서 via_bin 에 찍는 데 쓴다.
 
-    두 조건의 AND 로 찾는다.
-      (1) 전역 : PAD 밝기 중앙값 * DARK_RATIO 보다 어두움
+    두 조건의 AND 로 후보를 만든다.
+      (1) 전역 : PAD 밝기 중앙값 * DARK_RATIO + dark_offset 보다 어두움
       (2) 국소 : Black-hat 응답이 큼 = 주변보다 움푹 들어간 고립된 우물
     PAD 테두리는 '단조 경사'라 Black-hat 응답이 거의 0 이므로 자연히 걸러진다.
     덕분에 PAD 를 크게 깎지 않아도 되고 가장자리로 쏠린 VIA 도 놓치지 않는다.
+
+    그 다음 크기와 모양으로 후보를 거르고, 남은 것 중 가장 큰 것을 고른다.
     """
     inner = cv2.erode(shape, ero) if PAD_ERODE > 0 else shape
     if np.count_nonzero(inner) < VIA_MIN_AREA * 4:
         return None
 
     med = float(np.median(roi[inner > 0]))
-    thr = med * DARK_RATIO
+    # 임계값을 0 이나 255 로 밀어버리면 전부 탈락/전부 통과가 되어 원인 파악이 어렵다.
+    thr = float(np.clip(med * DARK_RATIO + dark_offset, 1.0, 254.0))
     row["pad_median"] = round(med, 1)
     row["dark_threshold"] = round(thr, 1)
 
@@ -550,11 +653,39 @@ def _find_via(roi: np.ndarray,
 
     num, lab, stats, cents = cv2.connectedComponentsWithStats(cand, 8)
     max_area = max(int(np.count_nonzero(shape) * VIA_MAX_AREA_RATIO), VIA_MIN_AREA)
-    best, best_area = -1, 0
+
+    # VIA 는 항상 원형이다. 크기가 맞아도 모양이 원이 아니면 뒤로 밀어둔다.
+    # PAD 표면의 긁힘 자국은 크기만 보면 진짜 VIA 보다 커서 그냥 두면 이기지만,
+    # 1px 폭이라 장단비에서 걸린다. 그래서 원형인 것 중에서 먼저 고른다.
+    #
+    # 다만 모양 조건은 '누가 VIA 인가' 를 고르는 데만 쓰고
+    # 'VIA 가 없다' 고 단정하는 데는 쓰지 않는다. 원형 후보가 하나도 없으면
+    # 모양을 무시하고 가장 큰 것을 그냥 쓴다. 이유 :
+    #   긁힘이 진짜 VIA 를 가로지르면 둘이 한 덩어리로 붙어 길쭉해진다.
+    #   이때 탈락시키면 멀쩡한 PAD 가 VIA_MISSING(코드 42) 으로 둔갑한다.
+    #   실측에서 이 역전이 4건 나왔고, 대안이 있을 때만 거르도록 바꿔 0건이 됐다.
+    # 즉 이 필터는 판정을 뒤집지 못하고 후보 선택만 바꾼다.
+    best, best_area, best_shape = -1, 0, (0.0, 0.0)
+    alt, alt_area, alt_shape = -1, 0, (0.0, 0.0)
+    rejected = 0
     for i in range(1, num):
         a = int(stats[i, 4])
-        if VIA_MIN_AREA <= a <= max_area and a > best_area:
-            best, best_area = i, a
+        if not (VIA_MIN_AREA <= a <= max_area):
+            continue
+        ys, xs = np.nonzero(lab == i)
+        aspect, dev = _roundness(ys, xs)
+        if a > alt_area:
+            alt, alt_area, alt_shape = i, a, (aspect, dev)
+        if aspect > VIA_MAX_ASPECT or dev > VIA_MAX_RADIAL_DEV:
+            rejected += 1
+            continue
+        if a > best_area:
+            best, best_area, best_shape = i, a, (aspect, dev)
+
+    row["shape_rejected"] = rejected
+    if best < 0:
+        # 원형 후보가 없다. 모양을 포기하고 가장 큰 것을 쓴다 (없다고 하지는 않는다).
+        best, best_area, best_shape = alt, alt_area, alt_shape
     if best < 0:
         return None
 
@@ -570,19 +701,25 @@ def _find_via(roi: np.ndarray,
     else:
         cx, cy = float(cents[best][0]), float(cents[best][1])
 
-    return {"cx": cx, "cy": cy, "area": best_area, "mask": blob}
+    return {"cx": cx, "cy": cy, "area": best_area, "mask": blob,
+            "aspect": best_shape[0], "radial_dev": best_shape[1]}
 
 
 # ============================================================================
 # 결과 이미지
 # ============================================================================
 def _draw(src: np.ndarray, rows: List[Dict[str, Any]], numbering: bool) -> np.ndarray:
-    """원본과 같은 해상도에 PAD 하나당 마커 하나만 그린다. 원본은 건드리지 않는다.
+    """원본과 같은 해상도에 판정 마커를 그린다. 원본은 건드리지 않는다.
 
-        정상    : 초록 원
-        쏠림    : 주황 원 + PAD중심 -> VIA중심 화살표
-        VIA없음 : 빨강 X
-        PAD없음 : 회색 원
+        PAD 판정 마커
+          정상    : 초록 원
+          쏠림    : 주황 원 + PAD중심 -> VIA중심 화살표
+          VIA없음 : 빨강 X
+          PAD없음 : 회색 원
+
+        찾아낸 VIA (판정과 무관하게 항상)
+          하늘색 원 + 중심점. 원 크기는 실제로 검출된 덩어리 크기입니다.
+          어디를 VIA 로 봤는지 눈으로 바로 확인할 수 있습니다.
     """
     out = src.copy()
     for r in rows:
@@ -608,6 +745,15 @@ def _draw(src: np.ndarray, rows: List[Dict[str, Any]], numbering: bool) -> np.nd
             cv2.circle(out, (px, py), rad, COLOR_ABSENT, 1, cv2.LINE_AA)
             color = COLOR_ABSENT
 
+        # 찾아낸 VIA 를 실제 크기로 표기한다. 판정선(초록/주황)과 겹쳐도
+        # 색이 달라 구분되고, 오검출이면 엉뚱한 자리에 원이 그려져 바로 보인다.
+        if r["via_center"] is not None:
+            vx = int(round(r["via_center"][0]))
+            vy = int(round(r["via_center"][1]))
+            vr = max(int(round(np.sqrt(max(r["via_area"], 1) / np.pi))), 2)
+            cv2.circle(out, (vx, vy), vr, COLOR_VIA, 1, cv2.LINE_AA)
+            cv2.circle(out, (vx, vy), 0, COLOR_VIA, -1)   # 중심점 1px
+
         if numbering:
             cv2.putText(out, str(r["pad_id"]), (px + rad + 1, py - rad),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1, cv2.LINE_AA)
@@ -628,9 +774,10 @@ def _print_table(code: str, rows: List[Dict[str, Any]]) -> None:
         return
 
     head = ("PAD", "판정", "PAD중심", "VIA중심", "편심px", "편심비율",
-            "허용", "VIA면적", "PAD밝기", "덮임", "정합이동")
-    print("%4s %-12s %-16s %-16s %7s %9s %7s %8s %8s %6s %12s" % head)
-    print("-" * 118)
+            "허용", "VIA면적", "장단비", "반경편차", "모양탈락",
+            "PAD밝기", "임계", "덮임", "정합이동")
+    print("%4s %-12s %-16s %-16s %7s %9s %6s %8s %7s %9s %9s %8s %6s %6s %12s" % head)
+    print("-" * 150)
 
     def pt(v):
         return "-" if v is None else "(%.1f,%.1f)" % (v[0], v[1])
@@ -640,9 +787,12 @@ def _print_table(code: str, rows: List[Dict[str, Any]]) -> None:
 
     for r in rows:
         flag = "NG" if r["status"] in ("VIA_OFFSET", "VIA_MISSING") else "  "
-        print("%4d %-12s %-16s %-16s %7s %9s %7s %8s %8s %6s %12s %s" % (
+        rej = r["shape_rejected"]
+        print("%4d %-12s %-16s %-16s %7s %9s %6s %8s %7s %9s %9s %8s %6s %6s %12s %s" % (
             r["pad_id"], r["status"], pt(r["pad_center"]), pt(r["via_center"]),
             num(r["offset_px"]), num(r["offset_norm"], "%.4f"),
             "%.2f" % OFFSET_TOL, num(r["via_area"], "%d"),
-            num(r["pad_median"], "%.1f"), num(r["pad_coverage"], "%.2f"),
-            pt(r["align_shift"]), flag))
+            num(r["via_aspect"]), num(r["via_radial_dev"], "%.3f"),
+            "%d" % rej if rej else "-",
+            num(r["pad_median"], "%.1f"), num(r["dark_threshold"], "%.1f"),
+            num(r["pad_coverage"], "%.2f"), pt(r["align_shift"]), flag))
