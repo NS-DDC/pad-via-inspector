@@ -1,22 +1,42 @@
 # -*- coding: utf-8 -*-
-"""via_code.py - 이미 이진화된 VIA 를 받아 코드만 돌려주는 모듈 (단일 파일, 복붙용)
+"""via_code.py - 이미 이진화된 VIA 를 받아 코드와 결과 이미지를 돌려주는 모듈
 
 VIA 이진화를 직접 하고 계신 경우를 위한 판정 전용 모듈입니다.
-이미지를 그리지 않고 표도 안 찍습니다. 문자열 하나만 나옵니다.
+VIA 를 찾지 않습니다. 이미 찾아 놓은 것을 '판정만' 합니다.
 
     from via_code import check_via_code
 
-    code = check_via_code(VIA이진화, PAD설계도, VIA설계도)
+    code, result = check_via_code(VIA이진화, PAD설계도, VIA설계도)
 
-    #  code : "1"  양품
-    #         "42" VIA 없음        (둘 다면 42 가 우선)
-    #         "99" VIA 쏠림
-    #         "-1" 입력 오류 (이유는 표준에러로 나감)
+    #  code   : "1"  양품
+    #           "42" VIA 없음        (둘 다면 42 가 우선)
+    #           "99" VIA 쏠림
+    #           "-1" 입력 오류 (이유는 표준에러로 나감. 이때 result 는 None)
+    #  result : 판정 마커를 그린 BGR 이미지 (입력과 같은 해상도)
 
-왜 판정이 그렇게 나왔는지 보고 싶으면 verbose 를 켜세요.
-반환값은 그대로 코드 문자열 하나입니다.
+    cv2.imwrite("result.png", result)
 
-    code = check_via_code(VIA이진화, PAD설계도, VIA설계도, verbose=True)
+왜 그렇게 판정했는지 표로도 보고 싶으면 verbose 를 켜세요.
+반환값은 그대로 (코드, 결과이미지) 둘입니다.
+
+    code, result = check_via_code(VIA이진화, PAD설계도, VIA설계도, verbose=True)
+
+--------------------------------------------------------------------------
+결과 이미지 배경 - image 를 주면 그 위에, 안 주면 합성 배경에 그립니다
+--------------------------------------------------------------------------
+    code, result = check_via_code(VIA이진화, PAD설계도, VIA설계도, image=원본)
+
+  이 모듈은 원본 사진을 받지 않는 게 기본이라(판정만 하니까) 그릴 바탕이 없습니다.
+  그래서 원본을 안 주면 받은 마스크들을 회색조로 겹쳐 바탕을 만듭니다.
+
+      검정   아무것도 없는 곳
+      진회색 PAD 설계도
+      중간   실측 PAD (bin_mask 를 준 경우)
+      밝은회 사용자가 준 VIA 이진화
+
+  마커는 그 위에 원색으로 그리므로 어느 쪽이든 구분됩니다.
+  원본을 손에 들고 계시면 image 로 주는 편이 눈으로 보기 좋습니다.
+  판정 결과는 배경과 무관하게 완전히 같습니다 (image 는 그리기에만 씁니다).
 
 --------------------------------------------------------------------------
 via_checker.py 와 무엇이 다른가
@@ -29,18 +49,21 @@ via_checker.py 와 무엇이 다른가
   테스트셋 44장 / PAD 783개로 확인했습니다.
 
     code, result, via_bin = check_via(원본, 이진화, PAD설계도, VIA설계도)
-    assert check_via_code(via_bin, PAD설계도, VIA설계도, bin_mask=이진화) == code
+    code2, result2 = check_via_code(via_bin, PAD설계도, VIA설계도,
+                                    bin_mask=이진화, image=원본)
+    assert code2 == code          # 결과 이미지도 같은 마커로 그려집니다
 
   bin_mask 를 빼면 PAD 누락 구분이 꺼져서 5장이 갈립니다 (아래 설명 참고).
 
 --------------------------------------------------------------------------
-입력 3장 (+ 선택 1장)
+입력 3장 (+ 선택 2장)
 --------------------------------------------------------------------------
   1) VIA 이진화  : 직접 만드신 VIA 마스크. 흰색 = VIA (ndarray 또는 파일 경로)
   2) PAD 설계도  : PAD 가 있어야 할 자리 (이진)
   3) VIA 설계도  : VIA 가 있어야 할 자리 (이진)
 
-  선택) 이진화     : 실측 PAD 마스크. 주는 편이 낫습니다. 바로 아래 설명 참고.
+  선택) bin_mask : 실측 PAD 마스크. 주는 편이 낫습니다. 바로 아래 설명 참고.
+  선택) image    : 원본 사진. 결과 이미지의 바탕으로만 씁니다. 판정에는 안 씁니다.
 
   모두 같은 해상도·같은 좌표계여야 합니다.
   크기가 다르면 조용히 리사이즈하지 않고 "-1" 로 실패합니다.
@@ -86,13 +109,27 @@ via_checker.py 와 무엇이 다른가
     그 외                   -> 1
     실물 PAD 가 없음        -> 코드에 반영 안 함 (bin_mask 를 준 경우에만 구분됨)
 
-  덩어리를 고를 때 거르는 조건 세 가지입니다.
+  덩어리를 고를 때 거르는 조건 네 가지입니다.
 
     면적      VIA_MIN_AREA ~ PAD면적*VIA_MAX_AREA_RATIO 밖이면 탈락
     경계 여유 PAD 경계에 붙어 있으면 탈락 (되살리지 않음)
+    채움비    최소외접원을 못 채우면(링·호) 탈락 (되살리지 않음)
     모양      원이 아니면 뒤로 밀어둠 (원형 후보가 없으면 그냥 씀)
 
-  경계 여유만 '탈락' 이고 모양은 '선호' 입니다. 이유는 아래 상수 설명에 있습니다.
+  앞의 셋은 '탈락' 이고 모양만 '선호' 입니다. 이유는 아래 상수 설명에 있습니다.
+
+--------------------------------------------------------------------------
+결과 이미지 색 읽는 법
+--------------------------------------------------------------------------
+  PAD 판정 (PAD 중심에 그립니다)
+    초록 원   정상
+    주황 원   VIA 쏠림 + PAD중심에서 VIA중심으로 화살표
+    빨강 X    VIA 없음
+    회색 원   PAD 없음 (bin_mask 를 준 경우에만 나옵니다. 코드에는 반영 안 됨)
+
+  고른 VIA (판정과 무관하게 항상 그립니다)
+    하늘색 원 + 중심점. 원 크기는 실제로 고른 덩어리 크기입니다.
+    엉뚱한 자리에 하늘색 원이 있으면 주신 VIA 이진화가 잘못된 것입니다.
 
 의존성 : numpy, opencv-python  (Python 3.9+)
 """
@@ -157,6 +194,16 @@ VIA_MAX_AREA_RATIO = 0.25     # 최대 = PAD 면적 * 이 값
 #   테두리 링     중앙 0.254  p1  0.086    (실물 이미지 158개)
 VIA_MIN_CLEARANCE = 0.30
 
+# VIA 로 인정할 최소 채움비 = 덩어리 면적 / 그 덩어리의 최소외접원 면적.
+# 꽉 찬 원은 0.6~0.9 가 나오고, 테두리를 두른 링이나 호(弧)는 0.2 아래로 떨어집니다.
+#
+# 경계 여유(위)와 목적은 같은데 보는 곳이 다릅니다. 경계 여유는 덩어리 안의
+# '가장 깊은 한 점' 만 보기 때문에, 링이 두껍게 잡히면 그 한 점이 임계를 아슬아슬
+# 하게 넘어 통과해 버립니다 (실측 : 8.00 vs 임계 7.71 로 통과). 채움비는 덩어리
+# '전체 모양' 을 보므로 그 경우도 막습니다. 링이 이미지 끝에서 잘려 열린 C 자가
+# 되어도 최소외접원은 그대로 크기 때문에 값이 낮게 유지됩니다.
+VIA_MIN_FILL = 0.45
+
 # VIA 모양 조건. 둘 다 크기와 무관한 무차원 값이라 배율이 바뀌어도 그대로 씁니다.
 #   장단비   = 외접 사각형의 긴변 / 짧은변          (원 = 1.0)
 #   반경편차 = 중심까지 거리의 표준편차 / 등가반지름 (꽉 찬 원 = 0.236, 크기 무관)
@@ -181,53 +228,81 @@ MIN_VIA_AREA = 1              # VIA 설계 점의 최소 px
 
 
 # ============================================================================
+# 결과 이미지 색 (BGR) - via_checker.py 와 같은 색입니다.
+# ============================================================================
+COLOR_OK = (0, 220, 0)          # 초록 : 정상
+COLOR_OFFSET = (0, 165, 255)    # 주황 : 쏠림
+COLOR_MISSING = (0, 0, 255)     # 빨강 : VIA 없음
+COLOR_ABSENT = (150, 150, 150)  # 회색 : PAD 없음
+COLOR_VIA = (255, 255, 0)       # 하늘 : 고른 VIA 위치 (판정과 무관하게 항상 표기)
+
+# 원본(image)을 안 줬을 때 마스크로 합성하는 배경의 밝기.
+# 마커가 원색이라 배경은 무채색으로 낮게 깔아 둡니다.
+BG_PAD_DESIGN = 45       # PAD 설계도
+BG_PAD_ACTUAL = 85       # 실측 PAD (bin_mask)
+BG_VIA_INPUT = 170       # 사용자가 준 VIA 이진화
+
+
+# ============================================================================
 # 공개 함수
 # ============================================================================
 def check_via_code(via_bin: Union[str, np.ndarray],
                    pad_design: Union[str, np.ndarray],
                    via_design: Union[str, np.ndarray],
                    bin_mask: Optional[Union[str, np.ndarray]] = None,
-                   verbose: bool = False) -> str:
-    """이미 이진화된 VIA 마스크를 받아 코드 문자열 하나만 돌려준다.
+                   image: Optional[Union[str, np.ndarray]] = None,
+                   verbose: bool = False
+                   ) -> Tuple[str, Optional[np.ndarray]]:
+    """이미 이진화된 VIA 마스크를 받아 (코드, 결과이미지) 를 돌려준다.
 
-        code = check_via_code(VIA이진화, PAD설계도, VIA설계도)
+        code, result = check_via_code(VIA이진화, PAD설계도, VIA설계도)
 
-    "1"(양품) / "42"(VIA 없음) / "99"(VIA 쏠림) / "-1"(입력 오류) 중 하나입니다.
-    한 이미지에 없음과 쏠림이 같이 있으면 "42" 가 우선합니다.
+    code   : "1"(양품) / "42"(VIA 없음) / "99"(VIA 쏠림) / "-1"(입력 오류)
+             한 이미지에 없음과 쏠림이 같이 있으면 "42" 가 우선합니다.
+    result : 판정 마커를 그린 BGR 이미지. 입력 오류일 때만 None 입니다.
 
     bin_mask : 실측 PAD 마스크. 주면 설계도-실물 어긋남을 국소 정합으로 흡수합니다.
                안 주면 어긋난 만큼이 그대로 편심에 더해져 99 가 늘 수 있습니다.
-    verbose  : PAD 별 판정 근거를 표준출력에 찍습니다. 반환값은 그대로 코드 하나.
+    image    : 결과 이미지의 바탕으로 쓸 원본. 판정에는 전혀 안 씁니다.
+               안 주면 받은 마스크들을 회색조로 겹쳐 바탕을 만듭니다.
+    verbose  : PAD 별 판정 근거를 표준출력에 찍고, 결과 이미지에 번호도 답니다.
     """
     try:
         vmask = _to_mask(via_bin, "VIA 이진화")
         pdes = _to_mask(pad_design, "PAD 설계도")
         vdes = _to_mask(via_design, "VIA 설계도")
         act = _to_mask(bin_mask, "이진화 이미지") if bin_mask is not None else None
+        src = _to_bgr(image) if image is not None else None
     except ValueError as e:
         sys.stderr.write("[via_code] %s\n" % e)
-        return CODE_ERROR
+        return CODE_ERROR, None
 
     H, W = vmask.shape[:2]
     pairs = [("PAD 설계도", pdes), ("VIA 설계도", vdes)]
     if act is not None:
         pairs.append(("이진화 이미지", act))
+    if src is not None:
+        pairs.append(("원본 이미지", src))
     for nm, m in pairs:
         if m.shape[:2] != (H, W):
             sys.stderr.write("[via_code] %s 크기%s가 VIA 이진화 크기%s와 다릅니다.\n"
                              % (nm, m.shape[:2], (H, W)))
-            return CODE_ERROR
+            return CODE_ERROR, None
 
     rows = _judge(vmask, pdes, vdes, act)
     if verbose:
         _print_rows(rows)
 
+    if src is None:
+        src = _canvas(vmask, pdes, act)
+    result = _draw(src, rows, numbering=verbose)
+
     found = set(r["status"] for r in rows)
     for c in CODE_PRIORITY:
         if (c == CODE_VIA_MISSING and "VIA_MISSING" in found) or \
            (c == CODE_VIA_OFFSET and "VIA_OFFSET" in found):
-            return c
-    return CODE_OK
+            return c, result
+    return CODE_OK, result
 
 
 # ============================================================================
@@ -249,6 +324,23 @@ def _to_mask(src: Union[str, np.ndarray], name: str) -> np.ndarray:
     if m.ndim == 3:
         m = cv2.cvtColor(m, cv2.COLOR_BGR2GRAY)
     return np.where(m > 0, 255, 0).astype(np.uint8)
+
+
+def _to_bgr(src: Union[str, np.ndarray]) -> np.ndarray:
+    """결과 이미지 바탕용 원본을 3채널 BGR 로 맞춘다. 판정에는 쓰지 않는다."""
+    if isinstance(src, np.ndarray):
+        img: Optional[np.ndarray] = src
+    else:
+        try:
+            buf = np.fromfile(str(src), dtype=np.uint8)
+        except OSError:
+            buf = np.empty(0, np.uint8)
+        img = cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
+    if img is None:
+        raise ValueError("원본 이미지를 읽을 수 없습니다: %s" % src)
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    return img
 
 
 # ============================================================================
@@ -464,7 +556,7 @@ def _roundness(ys: np.ndarray, xs: np.ndarray) -> Tuple[float, float]:
                  모양을 잡는다.
 
     (링 모양은 반경편차가 오히려 작아서 이 두 값으로는 안 걸러진다.
-     그래서 링은 VIA_MIN_CLEARANCE 로 위치를 보고 따로 거른다.)
+     그래서 링은 VIA_MIN_CLEARANCE 와 아래 _fill_ratio 로 따로 거른다.)
     """
     w = float(xs.max() - xs.min() + 1)
     h = float(ys.max() - ys.min() + 1)
@@ -474,6 +566,18 @@ def _roundness(ys: np.ndarray, xs: np.ndarray) -> Tuple[float, float]:
     equiv_r = np.sqrt(len(xs) / np.pi)
     dev = float(d.std() / equiv_r) if equiv_r > 1e-6 else 0.0
     return aspect, dev
+
+
+def _fill_ratio(ys: np.ndarray, xs: np.ndarray, area: int) -> float:
+    """덩어리가 자기 최소외접원을 얼마나 채우는지. 크기와 무관한 무차원 값이다.
+
+    꽉 찬 원은 0.6~0.9, PAD 테두리를 두른 링이나 호(弧)는 0.2 아래로 떨어진다.
+    _roundness 의 두 값이 링을 '완벽한 원'으로 보는 맹점을 여기서 막는다.
+    링이 이미지 끝에서 잘려 열린 C 자가 되어도 최소외접원은 그대로 크므로
+    이 값은 여전히 낮게 나온다 (윤곽을 채워 보는 방식은 이 경우에 뚫린다).
+    """
+    _, r = cv2.minEnclosingCircle(np.stack([xs, ys], 1).astype(np.float32))
+    return float(area) / (np.pi * r * r) if r > 0.5 else 1.0
 
 
 def _pick_via(sub: np.ndarray,
@@ -487,7 +591,10 @@ def _pick_via(sub: np.ndarray,
     거르는 순서와 성격이 다르다.
       면적      하드 탈락. 너무 작으면 잡티, 너무 크면 PAD 얼룩이다.
       경계 여유 하드 탈락. 되살리지 않는다.
+      채움비    하드 탈락. 되살리지 않는다. 링·호를 막는다.
       모양      선호. 원형 후보가 하나도 없으면 모양을 포기하고 가장 큰 것을 쓴다.
+
+    하드 탈락 두 가지(경계 여유·채움비)는 row["edge_rejected"] 에 함께 센다.
     """
     inside = (sub > 0) & (shape > 0)
     if not np.any(inside):
@@ -519,6 +626,9 @@ def _pick_via(sub: np.ndarray,
         if float(dist[ys, xs].max()) < min_clr:
             row["edge_rejected"] += 1
             continue
+        if _fill_ratio(ys, xs, a) < VIA_MIN_FILL:
+            row["edge_rejected"] += 1
+            continue
 
         if a > alt_area:
             alt, alt_area = i, a
@@ -538,6 +648,84 @@ def _pick_via(sub: np.ndarray,
 
     return {"cx": float(cents[best][0]), "cy": float(cents[best][1]),
             "area": best_area}
+
+
+# ============================================================================
+# 결과 이미지
+# ============================================================================
+def _canvas(vmask: np.ndarray,
+            pdes: np.ndarray,
+            act: Optional[np.ndarray]) -> np.ndarray:
+    """원본을 안 줬을 때 마스크만으로 바탕을 만든다.
+
+    이 모듈은 원본 사진을 안 받는 게 기본이라 그릴 바탕이 없다. 그렇다고 새까만
+    화면에 마커만 띄우면 '어디에 그려진 건지' 를 알 수 없으므로, 받은 마스크를
+    밝기만 다르게 겹쳐 깔아 준다. 뒤에 그릴 마커는 전부 원색이라 안 섞인다.
+
+        검정 -> 진회색(PAD 설계) -> 중간(실측 PAD) -> 밝은회(준 VIA)  순으로 덮는다.
+    """
+    g = np.zeros(vmask.shape[:2], np.uint8)
+    g[pdes > 0] = BG_PAD_DESIGN
+    if act is not None:
+        g[act > 0] = BG_PAD_ACTUAL
+    g[vmask > 0] = BG_VIA_INPUT
+    return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
+
+
+def _draw(src: np.ndarray,
+          rows: List[Dict[str, Any]],
+          numbering: bool) -> np.ndarray:
+    """바탕과 같은 해상도에 판정 마커를 그린다. 바탕은 건드리지 않는다.
+
+        PAD 판정 마커
+          정상    : 초록 원
+          쏠림    : 주황 원 + PAD중심 -> VIA중심 화살표
+          VIA없음 : 빨강 X
+          PAD없음 : 회색 원
+
+        고른 VIA (판정과 무관하게 항상)
+          하늘색 원 + 중심점. 원 크기는 실제로 고른 덩어리 크기입니다.
+          주신 VIA 이진화에서 어느 덩어리를 골랐는지 눈으로 바로 확인할 수 있습니다.
+
+    via_checker.py 의 _draw 와 같은 규칙·같은 색으로 그립니다.
+    """
+    out = src.copy()
+    for r in rows:
+        px, py = int(round(r["pad_center"][0])), int(round(r["pad_center"][1]))
+        rad = max(int(round(r["pad_radius"])), 3)
+        st = r["status"]
+
+        if st == "OK":
+            cv2.circle(out, (px, py), rad, COLOR_OK, 1, cv2.LINE_AA)
+            color = COLOR_OK
+        elif st == "VIA_OFFSET":
+            cv2.circle(out, (px, py), rad, COLOR_OFFSET, 1, cv2.LINE_AA)
+            vx = int(round(r["via_center"][0]))
+            vy = int(round(r["via_center"][1]))
+            cv2.arrowedLine(out, (px, py), (vx, vy), COLOR_OFFSET, 1,
+                            cv2.LINE_AA, tipLength=0.35)
+            color = COLOR_OFFSET
+        elif st == "VIA_MISSING":
+            cv2.drawMarker(out, (px, py), COLOR_MISSING, cv2.MARKER_TILTED_CROSS,
+                           max(rad * 2, 7), 1, cv2.LINE_AA)
+            color = COLOR_MISSING
+        else:   # PAD_ABSENT
+            cv2.circle(out, (px, py), rad, COLOR_ABSENT, 1, cv2.LINE_AA)
+            color = COLOR_ABSENT
+
+        # 고른 VIA 를 실제 크기로 표기한다. 판정선(초록/주황)과 겹쳐도 색이 달라
+        # 구분되고, 엉뚱한 덩어리를 골랐으면 엉뚱한 자리에 원이 그려져 바로 보인다.
+        if r["via_center"] is not None:
+            vx = int(round(r["via_center"][0]))
+            vy = int(round(r["via_center"][1]))
+            vr = max(int(round(np.sqrt(max(r["via_area"], 1) / np.pi))), 2)
+            cv2.circle(out, (vx, vy), vr, COLOR_VIA, 1, cv2.LINE_AA)
+            cv2.circle(out, (vx, vy), 0, COLOR_VIA, -1)   # 중심점 1px
+
+        if numbering:
+            cv2.putText(out, str(r["pad_id"]), (px + rad + 1, py - rad),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1, cv2.LINE_AA)
+    return out
 
 
 # ============================================================================

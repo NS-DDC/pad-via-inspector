@@ -17,7 +17,7 @@
 PAD 표면 얼룩 때문에 엉뚱한 것을 VIA 로 잡으면 임계값을 내리세요.
 
     code, result, via_bin = check_via(원본, 이진화, PAD설계도, VIA설계도,
-                                      dark_offset=-8)   # 더 어두운 것만 VIA 로 인정
+                                      dark_offset=-25)  # 색이 확실히 다른 것만 인정
 
 디버깅할 때는 debug_via 를 쓰세요. PAD 별 수치가 표로 찍히고
 결과 이미지에는 PAD 번호가 함께 그려집니다.
@@ -109,13 +109,18 @@ PAD 표면 얼룩 때문에 엉뚱한 것을 VIA 로 잡으면 임계값을 내�
          멀쩡한 PAD 가 VIA_MISSING 으로 둔갑하기 때문입니다.
          즉 이 필터는 판정을 나쁘게 만들 수 없습니다.
 
-     (b) 어둡기로 거르기 (호출할 때 조절)
+     (b) 색상차로 거르기 (호출할 때 조절)
          노이즈가 원형이라 (a) 로 안 걸리면 dark_offset 을 음수로 주세요.
-         임계 = PAD밝기중앙값 * DARK_RATIO + dark_offset  (1~254 로 묶임)
+         임계 = 색상차중앙값 + COLOR_K * 로버스트편차 - dark_offset
 
-         단, 이건 만능이 아닙니다. 얼룩이 진짜 VIA 만큼 어두우면 같이
-         사라집니다. 대비가 연한 VIA 를 쓰는 라인이라면 조금씩(-3, -5)
-         내리면서 debug_via 의 dark_threshold 와 판정을 같이 보세요.
+         방향은 예전과 같습니다. 음수면 더 엄격해지고(오검출이 줄고),
+         양수면 더 민감해집니다(연한 VIA 를 더 잡습니다).
+         단위만 밝기(0~255)에서 색상차(세 채널 합, 대략 3배 스케일)로 바뀌었으니
+         예전에 -8 을 쓰셨다면 -24 쯤부터 보세요.
+
+         단, 이건 만능이 아닙니다. 얼룩이 진짜 VIA 만큼 색이 다르면 같이
+         사라집니다. 조금씩 움직이면서 debug_via 의 dark_threshold 와
+         판정을 같이 보세요.
 
   4) "PAD 테두리를 VIA 로 오인"  <- 넷 중 가장 심각했던 것
      실물에서 PAD 테두리를 한 바퀴 두른 어두운 링이 후보로 올라옵니다.
@@ -132,10 +137,20 @@ PAD 표면 얼룩 때문에 엉뚱한 것을 VIA 로 잡으면 임계값을 내�
        경계여유 = max(거리변환(설계PAD)[덩어리]) / PAD반지름
 
      실측 : 진짜 VIA 최소 0.536 / 테두리 링 중앙 0.254 -> 임계 0.30
-     몇 개를 걸렀는지는 rows 의 edge_rejected 에 찍힙니다.
 
-     중요 : 이것만 '탈락' 입니다. (3) 과 달리 되살리지 않습니다.
-     경계에 붙은 덩어리가 VIA 인 경우는 정의상 없기 때문입니다.
+     여기에 하나를 더 겹쳤습니다. 경계여유는 덩어리 안의 '가장 깊은 한 점'
+     만 보기 때문에, 테두리 전이대가 두껍게 잡히면 그 한 점이 임계를
+     아슬아슬하게 넘어 통과해 버립니다 (실측 : 8.00 vs 임계 7.71 로 통과).
+     그래서 덩어리 '전체 모양' 도 같이 봅니다.
+
+       채움비 = 덩어리 면적 / 그 덩어리의 최소외접원 면적
+
+     실측 : 꽉 찬 원 0.6~0.9 / 링·호 0.2 아래 -> 임계 0.45
+     이 둘로 실물 49장의 오검출이 187 -> 7 로 줄었습니다.
+     몇 개를 걸렀는지는 rows 의 edge_rejected 에 함께 찍힙니다.
+
+     중요 : 이 둘만 '탈락' 입니다. (3) 과 달리 되살리지 않습니다.
+     경계에 붙었거나 속이 빈 덩어리가 VIA 인 경우는 정의상 없기 때문입니다.
 
      탐색 영역을 더 깎는(PAD_ERODE 를 키우는) 방식은 실패했습니다.
      연한 VIA 는 화소가 4~5개뿐이라 3px 만 깎아도 통째로 사라집니다
@@ -189,10 +204,17 @@ ALIGN_MAX_RATIO = 0.40    # 최대 이동량 = PAD반지름 * 이 값
 ALIGN_MARGIN = 2          # 무게중심을 잴 때 설계 PAD 를 몇 px 키운 창을 볼지
 ALIGN_MIN_COVER = 0.30    # 창 안 실측 픽셀이 이 비율도 안 되면 정합 생략
 
-# VIA 후보 : PAD 밝기 중앙값 * DARK_RATIO 보다 어두운 픽셀
-# 최종 임계 = PAD밝기중앙값 * DARK_RATIO + dark_offset
+# VIA 후보 : PAD 대표색과 '색이 다른' 픽셀
+#
+#   색상차   = |화소BGR - PAD대표색BGR| 을 세 채널 더한 값 (L1)
+#   임계     = 색상차중앙값 + COLOR_K * 로버스트편차 - dark_offset
+#   로버스트편차 = 1.4826 * MAD(색상차)   (COLOR_FLOOR 아래로는 안 내려감)
+#
+# 밝기 비율(예전 방식)이 아니라 PAD 마다 자기 색을 기준으로 재는 상대값입니다.
+# 그래서 PAD 색이 라인마다 달라도, VIA 대비가 연해도 같은 숫자를 씁니다.
 # dark_offset 은 함수 호출할 때 넘기는 인자입니다 (기본 0). 여기 상수는 안 고쳐도 됩니다.
-DARK_RATIO = 0.62
+COLOR_K = 3.5
+COLOR_FLOOR = 6.0             # 편차가 0 에 가까운 매끈한 PAD 에서 임계가 붕괴하는 것 방지
 
 # VIA 모양 조건 - VIA 는 항상 원형이므로 원이 아닌 덩어리는 후보에서 뺍니다.
 # 둘 다 크기와 무관한 무차원 값이라 이미지 배율이 바뀌어도 그대로 씁니다.
@@ -207,7 +229,9 @@ DARK_RATIO = 0.62
 VIA_MAX_ASPECT = 2.2        # 이보다 길쭉하면 탈락
 VIA_MAX_RADIAL_DEV = 0.45   # 이보다 흩어져 있으면 탈락 (ㄴ자·대각선·부스러기)
 
-# Black-hat (주변보다 움푹 들어간 곳만 남겨 PAD 테두리 오검출을 막는 필터)
+# Black-hat / Top-hat (주변에서 홀로 튀는 곳만 남겨 PAD 테두리 오검출을 막는 필터)
+# 둘의 큰 쪽을 씁니다. VIA 가 PAD 보다 어두운 경우(Black-hat)와
+# 밝은 경우(Top-hat)를 모두 잡기 위해서입니다 - "색이 다르면 VIA".
 BLACKHAT_KSIZE_RATIO = 0.85   # 커널 크기 = PAD반지름 * 이 값 (VIA 보다 크고 PAD 보다 작게)
 BLACKHAT_MIN = 12.0           # 응답 절대 하한
 BLACKHAT_RATIO = 0.18         # 응답 상대 하한 (PAD 밝기 중앙값 * 이 값)
@@ -235,6 +259,20 @@ PAD_ERODE = 1
 #   진짜 VIA      최소 0.536  중앙 0.965   (테스트셋 746개)
 #   테두리 링     중앙 0.254  p1  0.086    (실물 이미지 158개)
 VIA_MIN_CLEARANCE = 0.30
+
+# VIA 로 인정할 최소 채움비 = 덩어리 면적 / 그 덩어리의 최소외접원 면적.
+# 꽉 찬 원은 0.6~0.9 가 나오고, 테두리를 두른 링이나 호(弧)는 0.2 아래로 떨어집니다.
+#
+# 위의 VIA_MIN_CLEARANCE 와 같은 문제(테두리 오검출)를 다른 각도에서 막습니다.
+# 경계 여유는 '덩어리 안에서 가장 깊은 한 점' 만 보기 때문에, 테두리 전이대가
+# 두껍게 잡히면 그 한 점이 임계를 아슬아슬하게 넘어 통과해 버립니다
+# (실측 : 경계여유 8.00 vs 임계 7.71 로 통과한 링이 OK 로 둔갑).
+# 채움비는 덩어리 '전체 모양' 을 보므로 이런 링을 확실히 걸러냅니다.
+# 이미지 오른쪽 끝에서 잘려 열린 C 자가 되어도 최소외접원은 그대로 커서 통과 못 합니다.
+#
+# 실측 (실물 이미지 49장, PAD 1016개에서 VIA 로 판정된 수)
+#   채움비 없음 187 -> 0.40 일 때 9 -> 0.45 일 때 7 (테스트셋 성적은 그대로)
+VIA_MIN_FILL = 0.45
 
 # 실물 PAD 존재 판정. 커버리지가 이 값 미만이면 PAD 없음.
 # 커버리지는 full 과 excl 중 큰 값입니다 (아래 VIA_EXCLUDE_RATIO 설명 참고).
@@ -276,14 +314,16 @@ def check_via(image: Union[str, np.ndarray],
     via_bin 은 검출한 VIA 만 흰색인 0/255 마스크입니다 (원본과 같은 해상도).
     "-1" 이면 result 와 via_bin 은 None 이고, 이유가 표준에러로 출력됩니다.
 
-    dark_offset : VIA 를 찾는 밝기 임계값을 밝기 단위로 올리고 내립니다 (기본 0).
+    dark_offset : VIA 를 찾는 색상차 임계값을 올리고 내립니다 (기본 0).
 
-        임계값 = PAD밝기중앙값 * 0.62 + dark_offset
+        임계값 = 색상차중앙값 + 3.5 * 로버스트편차 - dark_offset
+        색상차 = |화소BGR - PAD대표색BGR| 을 세 채널 더한 값
 
-        음수  더 어두운 픽셀만 VIA 로 본다  -> 표면 얼룩에 안 속음 (노이즈 억제)
-        양수  덜 어두운 픽셀도 VIA 로 본다  -> 연한 VIA 를 놓치지 않음
+        음수  색이 확실히 다른 픽셀만 VIA 로 본다 -> 표면 얼룩에 안 속음
+        양수  조금만 달라도 VIA 로 본다          -> 연한 VIA 를 놓치지 않음
 
-    한 번에 -20 씩 움직이지 말고 -5 정도씩 옮기면서 debug_via 의
+    단위가 밝기(0~255)가 아니라 세 채널 합이라 대략 3배 스케일입니다.
+    한 번에 크게 움직이지 말고 -15 정도씩 옮기면서 debug_via 의
     dark_threshold 열을 보세요. 실제로 적용된 값이 그대로 찍힙니다.
     """
     code, src, via_bin, rows, err = _run(image, bin_mask, pad_design, via_design,
@@ -443,7 +483,8 @@ def _run(image: Union[str, np.ndarray],
             return CODE_ERROR, None, None, [], (
                 "%s 크기%s가 원본 이미지 크기%s와 다릅니다." % (nm, m.shape[:2], (H, W)))
 
-    gray = cv2.GaussianBlur(cv2.cvtColor(src, cv2.COLOR_BGR2GRAY), (3, 3), 0)
+    # VIA 는 'PAD 대표색과 색이 다른 곳' 으로 찾으므로 흑백이 아니라 컬러를 넘깁니다.
+    blur = cv2.GaussianBlur(src, (3, 3), 0)
 
     pad_label, boxes = _label_pads(pdes)
     design_vias = _map_vias(vdes, pad_label)
@@ -475,7 +516,7 @@ def _run(image: Union[str, np.ndarray],
         x0, x1 = max(x - mg, 0), min(x + w + mg, W)
         y0, y1 = max(y - mg, 0), min(y + h + mg, H)
 
-        roi = gray[y0:y1, x0:x1]
+        roi = blur[y0:y1, x0:x1]
         act = actual[y0:y1, x0:x1]
 
         # 기준 형상은 '설계 PAD' 를 쓴다.
@@ -641,7 +682,7 @@ def _roundness(ys: np.ndarray, xs: np.ndarray) -> Tuple[float, float]:
                  속이 안 찬' 모양을 잡는다. 장단비가 못 잡는 것을 담당한다.
 
     (링 모양은 반경편차가 오히려 작아서 이 두 값으로는 안 걸러진다.
-     실물에서 나오는 노이즈가 아니라 일부러 다루지 않는다.)
+     링은 아래 _fill_ratio 가 담당한다.)
     """
     w = float(xs.max() - xs.min() + 1)
     h = float(ys.max() - ys.min() + 1)
@@ -653,25 +694,45 @@ def _roundness(ys: np.ndarray, xs: np.ndarray) -> Tuple[float, float]:
     return aspect, dev
 
 
+def _fill_ratio(ys: np.ndarray, xs: np.ndarray, area: int) -> float:
+    """덩어리가 자기 최소외접원을 얼마나 채우는지. 크기와 무관한 무차원 값이다.
+
+    꽉 찬 원은 0.6~0.9, PAD 테두리를 두른 링이나 호(弧)는 0.2 아래로 떨어진다.
+    _roundness 의 두 값이 링을 '완벽한 원'으로 보는 맹점을 여기서 막는다.
+    링이 이미지 끝에서 잘려 열린 C 자가 되어도 최소외접원은 그대로 크므로
+    이 값은 여전히 낮게 나온다 (윤곽을 채워 보는 방식은 이 경우에 뚫린다).
+    """
+    _, r = cv2.minEnclosingCircle(np.stack([xs, ys], 1).astype(np.float32))
+    return float(area) / (np.pi * r * r) if r > 0.5 else 1.0
+
+
 def _find_via(roi: np.ndarray,
               shape: np.ndarray,
               radius: float,
               ero: np.ndarray,
               row: Dict[str, Any],
               dark_offset: float) -> Optional[Dict[str, Any]]:
-    """PAD 한 개 안에서 VIA 를 찾는다. 없으면 None.
+    """PAD 한 개 안에서 VIA 를 찾는다. 없으면 None.  roi 는 BGR 컬러다.
 
     찾으면 {"cx", "cy", "area", "mask", "aspect", "radial_dev"} 를 준다.
     mask 는 채택한 덩어리의 bool 배열(roi 와 같은 크기)로,
     호출부에서 via_bin 에 찍는 데 쓴다.
 
     두 조건의 AND 로 후보를 만든다.
-      (1) 전역 : PAD 밝기 중앙값 * DARK_RATIO + dark_offset 보다 어두움
-      (2) 국소 : Black-hat 응답이 큼 = 주변보다 움푹 들어간 고립된 우물
-    PAD 테두리는 '단조 경사'라 Black-hat 응답이 거의 0 이므로 자연히 걸러진다.
+      (1) 전역 : PAD 대표색과 '색이 다름'
+                 색상차 = |화소BGR - PAD대표색BGR| 세 채널 합
+                 임계   = 색상차중앙값 + COLOR_K * 로버스트편차 - dark_offset
+      (2) 국소 : Black-hat/Top-hat 응답이 큼 = 주변에서 홀로 튀는 얼룩
+    PAD 테두리는 '단조 경사'라 hat 응답이 거의 0 이므로 자연히 걸러진다.
     덕분에 PAD 를 크게 깎지 않아도 되고 가장자리로 쏠린 VIA 도 놓치지 않는다.
 
-    그 다음 크기와 모양으로 후보를 거르고, 남은 것 중 가장 큰 것을 고른다.
+    (1) 을 밝기 비율이 아니라 색상차로 재는 이유 :
+    밝기 비율(예전 방식)은 'PAD 밝기의 62% 보다 어두움' 이라는 절대 기준이라
+    대비가 연한 VIA 를 통째로 놓쳤다. 색상차는 그 PAD 자신의 색 분포로
+    정규화한 상대 기준이라, PAD 색이 라인마다 달라도 연한 VIA 를 잡아낸다.
+    또 어두운 쪽만이 아니라 '다른 색' 이면 잡으므로 밝은 이물도 걸린다.
+
+    그 다음 크기·위치·모양으로 후보를 거르고, 남은 것 중 가장 큰 것을 고른다.
     """
     inner = cv2.erode(shape, ero)
     if np.count_nonzero(inner) < VIA_MIN_AREA * 4:
@@ -681,24 +742,35 @@ def _find_via(roi: np.ndarray,
     dist = cv2.distanceTransform((shape > 0).astype(np.uint8), cv2.DIST_L2, 5)
     min_clr = radius * VIA_MIN_CLEARANCE
 
-    med = float(np.median(roi[inner > 0]))
-    # 임계값을 0 이나 255 로 밀어버리면 전부 탈락/전부 통과가 되어 원인 파악이 어렵다.
-    thr = float(np.clip(med * DARK_RATIO + dark_offset, 1.0, 254.0))
+    m = inner > 0
+    f = roi.astype(np.float32)
+    base = np.median(f[m], axis=0)              # PAD 대표색 (B, G, R)
+    diff = np.abs(f - base).sum(axis=2)         # 대표색과의 L1 색상차
+
+    # 임계는 색상차 자체의 분포로 정한다. 평균/표준편차 대신 중앙값/MAD 를 쓰는 이유는
+    # VIA 나 얼룩이 몇 개 섞여 있어도 기준선이 그쪽으로 끌려가지 않게 하기 위해서다.
+    d = diff[m]
+    d_med = float(np.median(d))
+    scale = max(1.4826 * float(np.median(np.abs(d - d_med))), COLOR_FLOOR)
+    thr = d_med + COLOR_K * scale - dark_offset
+
+    gray = cv2.cvtColor(np.clip(f, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY)
+    med = float(np.median(gray[m]))
     row["pad_median"] = round(med, 1)
     row["dark_threshold"] = round(thr, 1)
 
-    dark = (roi < thr) & (inner > 0)
-
-    # PAD 바깥(어두운 배경)을 PAD 중앙값으로 메운 뒤 Black-hat 을 건다.
+    # PAD 바깥(어두운 배경)을 PAD 중앙값으로 메운 뒤 hat 을 건다.
     # 그대로 두면 가장자리로 쏠린 VIA 주변에서 closing 이 배경 어둠에 끌려
-    # 내려가 Black-hat 응답이 사라진다(= 쏠린 VIA 를 놓친다).
-    filled = np.where(shape > 0, roi, np.uint8(round(med)))
+    # 내려가 응답이 사라진다(= 쏠린 VIA 를 놓친다).
+    filled = np.where(shape > 0, gray, np.uint8(round(med)))
     ks = int(np.clip(int(round(radius * BLACKHAT_KSIZE_RATIO)) | 1, 5, 31))
     se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
-    bh = cv2.morphologyEx(filled, cv2.MORPH_BLACKHAT, se).astype(np.float32)
+    # 어두운 VIA 는 Black-hat, 밝은 이물은 Top-hat 에 걸린다. 큰 쪽을 쓴다.
+    bh = np.maximum(cv2.morphologyEx(filled, cv2.MORPH_BLACKHAT, se),
+                    cv2.morphologyEx(filled, cv2.MORPH_TOPHAT, se)).astype(np.float32)
     bh_thr = max(BLACKHAT_MIN, med * BLACKHAT_RATIO)
 
-    cand = (dark & (bh > bh_thr) & (inner > 0)).astype(np.uint8)
+    cand = ((diff > thr) & (bh > bh_thr) & m).astype(np.uint8)
     # 여기서 MORPH_OPEN 으로 잡티를 지우면 안 된다.
     # 대비가 약한 VIA(코어 밝기 = PAD 밝기의 0.45배)는 임계 아래로 내려가는 화소가
     # 4~5개뿐이고 모양도 십자/대각이라 2x2 로 열면 통째로 사라진다(= 오검출 VIA_MISSING).
@@ -735,8 +807,14 @@ def _find_via(roi: np.ndarray,
 
         # PAD 테두리를 두른 어두운 링 걸러내기.
         # 링은 장단비 1.0 / 반경편차 0.1~0.2 라 모양으로는 '완벽한 원' 이고
-        # 무게중심도 PAD 중심과 겹쳐서 편심 0 = OK 로 나온다. 위치로만 잡힌다.
+        # 무게중심도 PAD 중심과 겹쳐서 편심 0 = OK 로 나온다.
+        # (가) 위치 : 덩어리에서 가장 깊은 점이 PAD 경계에 가까우면 링이다.
+        # (나) 채움 : 링/호는 자기 최소외접원을 거의 못 채운다. (가) 가 아슬아슬하게
+        #      통과하는 두꺼운 전이대도 여기서 확실히 걸린다.
         if float(dist[ys, xs].max()) < min_clr:
+            edge_rejected += 1
+            continue
+        if _fill_ratio(ys, xs, a) < VIA_MIN_FILL:
             edge_rejected += 1
             continue
 
@@ -760,11 +838,11 @@ def _find_via(roi: np.ndarray,
 
     blob = lab == best
     # 이진 중심은 픽셀 양자화 오차가 커서 작은 VIA 에서 흔들린다.
-    # '어두운 정도'를 가중치로 쓴 무게중심이 훨씬 안정적이다(서브픽셀).
-    wgt = np.clip(thr - roi.astype(np.float32), 0.0, None) * blob
+    # '색이 얼마나 다른가'를 가중치로 쓴 무게중심이 훨씬 안정적이다(서브픽셀).
+    wgt = np.clip(diff - thr, 0.0, None) * blob
     total = float(wgt.sum())
     if total > 1e-6:
-        gy, gx = np.mgrid[0:roi.shape[0], 0:roi.shape[1]].astype(np.float32)
+        gy, gx = np.mgrid[0:shape.shape[0], 0:shape.shape[1]].astype(np.float32)
         cx = float((gx * wgt).sum() / total)
         cy = float((gy * wgt).sum() / total)
     else:
