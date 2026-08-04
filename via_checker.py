@@ -70,7 +70,7 @@ PAD 표면 얼룩 때문에 엉뚱한 것을 VIA 로 잡으면 임계값을 내�
   편심 = ||VIA중심 - PAD중심|| / PAD등가반지름
 
 --------------------------------------------------------------------------
-실물 이미지에서 자주 나던 오판정 두 가지를 어떻게 막는가
+실물 이미지에서 자주 나던 오판정 네 가지를 어떻게 막는가
 --------------------------------------------------------------------------
   1) "쏠림이 아닌데 쏠림"
      설계도와 실물은 완벽히 겹치지 않습니다. 2~3px 만 어긋나도 PAD 반지름이
@@ -116,6 +116,30 @@ PAD 표면 얼룩 때문에 엉뚱한 것을 VIA 로 잡으면 임계값을 내�
          단, 이건 만능이 아닙니다. 얼룩이 진짜 VIA 만큼 어두우면 같이
          사라집니다. 대비가 연한 VIA 를 쓰는 라인이라면 조금씩(-3, -5)
          내리면서 debug_via 의 dark_threshold 와 판정을 같이 보세요.
+
+  4) "PAD 테두리를 VIA 로 오인"  <- 넷 중 가장 심각했던 것
+     실물에서 PAD 테두리를 한 바퀴 두른 어두운 링이 후보로 올라옵니다.
+     이건 앞의 세 가지와 성격이 다릅니다. 멀쩡한 것을 불량이라고 하는 게
+     아니라 불량을 양품이라고 하는(놓치는) 오류이기 때문입니다.
+
+     링은 장단비 1.0 / 반경편차 0.13~0.20 이라 모양으로는 '완벽한 원'이고,
+     무게중심도 PAD 중심과 겹쳐 편심이 0 이 됩니다. 즉 VIA 가 아예 없는
+     PAD 가 OK 로 나옵니다. 위의 (3) 모양 필터로는 절대 못 잡습니다.
+
+     그래서 모양이 아니라 위치를 봅니다. VIA 는 PAD 안에 뚫린 구멍이라
+     정의상 경계에서 떨어져 있고, 링은 경계에 붙어 있습니다.
+
+       경계여유 = max(거리변환(설계PAD)[덩어리]) / PAD반지름
+
+     실측 : 진짜 VIA 최소 0.536 / 테두리 링 중앙 0.254 -> 임계 0.30
+     몇 개를 걸렀는지는 rows 의 edge_rejected 에 찍힙니다.
+
+     중요 : 이것만 '탈락' 입니다. (3) 과 달리 되살리지 않습니다.
+     경계에 붙은 덩어리가 VIA 인 경우는 정의상 없기 때문입니다.
+
+     탐색 영역을 더 깎는(PAD_ERODE 를 키우는) 방식은 실패했습니다.
+     연한 VIA 는 화소가 4~5개뿐이라 3px 만 깎아도 통째로 사라집니다
+     (실측 : 테스트셋 OK 705 -> 661). 자세한 것은 PAD_ERODE 주석 참고.
 
 의존성 : numpy, opencv-python  (Python 3.9+)
 """
@@ -192,8 +216,25 @@ BLACKHAT_RATIO = 0.18         # 응답 상대 하한 (PAD 밝기 중앙값 * 이
 VIA_MIN_AREA = 4              # 최소 px
 VIA_MAX_AREA_RATIO = 0.25     # 최대 = PAD 면적 * 이 값
 
-# 탐색 영역을 PAD 안쪽으로 몇 px 깎을지
+# 탐색 영역을 PAD 안쪽으로 몇 px 깎을지.
+# 이 값을 키워서 PAD 테두리 오검출을 막으려 하면 안 됩니다.
+# 연한 VIA 는 화소가 4~5개뿐이라 조금만 깎아도 통째로 사라집니다.
+# 테두리 문제는 아래 VIA_MIN_CLEARANCE 가 담당합니다.
 PAD_ERODE = 1
+
+# VIA 로 인정할 최소 경계 여유 = PAD반지름 * 이 값.
+# 덩어리 안에서 PAD 경계로부터 가장 먼 픽셀이 이 거리보다 가까우면 VIA 가 아닙니다.
+# VIA 는 PAD 안쪽에 뚫린 구멍이라 항상 경계에서 떨어져 있는 반면,
+# PAD 테두리를 한 바퀴 두른 어두운 링은 전부 경계에 붙어 있습니다.
+#
+# 이 조건이 꼭 필요한 이유 : 테두리 링은 장단비 1.0 / 반경편차 0.1~0.2 라
+# 모양만 보면 '완벽한 원'으로 보이고, 무게중심도 PAD 중심과 겹쳐 편심이 0 이
+# 됩니다. 즉 VIA 가 아예 없는 PAD 가 OK 로 둔갑합니다(불량 놓침).
+#
+# 실측 (PAD 반지름으로 나눈 값, 덩어리 최대 경계거리)
+#   진짜 VIA      최소 0.536  중앙 0.965   (테스트셋 746개)
+#   테두리 링     중앙 0.254  p1  0.086    (실물 이미지 158개)
+VIA_MIN_CLEARANCE = 0.30
 
 # 실물 PAD 존재 판정. 커버리지가 이 값 미만이면 PAD 없음.
 # 커버리지는 full 과 excl 중 큰 값입니다 (아래 VIA_EXCLUDE_RATIO 설명 참고).
@@ -273,11 +314,14 @@ def debug_via(image: Union[str, np.ndarray],
     - rows 는 PAD 별 dict 목록입니다. 들어있는 키:
         pad_id, status, pad_center, pad_radius, pad_area, pad_coverage,
         align_shift, design_via, via_center, via_area, offset_px, offset_norm,
-        pad_median, dark_threshold, via_aspect, via_radial_dev, shape_rejected
+        pad_median, dark_threshold, via_aspect, via_radial_dev,
+        shape_rejected, edge_rejected
       (해당 없는 항목은 None)
 
     align_shift 가 크게 나오면 설계도와 실물이 그만큼 어긋나 있다는 뜻입니다.
-    shape_rejected 가 0 이 아니면 모양 조건에서 걸러낸 후보가 그만큼 있었다는 뜻입니다.
+    shape_rejected 가 0 이 아니면 모양 조건에서 뒤로 밀어낸 후보가 그만큼 있었다는 뜻입니다.
+    edge_rejected 가 0 이 아니면 PAD 테두리에 붙어 탈락시킨 후보가 그만큼 있었다는 뜻입니다.
+    (뒤로 밀어낸 것은 되살아날 수 있고, 탈락시킨 것은 안 되살아납니다.)
     """
     code, src, via_bin, rows, err = _run(image, bin_mask, pad_design, via_design,
                                          dark_offset)
@@ -408,6 +452,11 @@ def _run(image: Union[str, np.ndarray],
     if DESIGN_PAD_SHRINK > 0:
         d = DESIGN_PAD_SHRINK
         dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * d + 1, 2 * d + 1))
+    # 침식은 1px 로 얕게만 한다. 여기서 크게 깎으면 안 된다.
+    # 연한 VIA 는 화소가 4~5개뿐이라 3px 만 깎아도 통째로 사라진다
+    # (실측: 침식 1->3 으로 바꿨더니 테스트셋 OK 705 -> 661 로 45개가
+    #  오검출 VIA_MISSING 이 됐다). 탐색 영역이 PAD 밖으로 조금 나가는 문제는
+    # 깎아서가 아니라 아래 VIA_MIN_CLEARANCE 로 '위치' 를 보고 막는다.
     ero = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
                                     (2 * PAD_ERODE + 1, 2 * PAD_ERODE + 1))
     alk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
@@ -465,6 +514,7 @@ def _run(image: Union[str, np.ndarray],
             "via_aspect": None,
             "via_radial_dev": None,
             "shape_rejected": 0,
+            "edge_rejected": 0,
         }
 
         # ---- 실물 PAD 가 그 자리에 있는지 ----
@@ -623,9 +673,13 @@ def _find_via(roi: np.ndarray,
 
     그 다음 크기와 모양으로 후보를 거르고, 남은 것 중 가장 큰 것을 고른다.
     """
-    inner = cv2.erode(shape, ero) if PAD_ERODE > 0 else shape
+    inner = cv2.erode(shape, ero)
     if np.count_nonzero(inner) < VIA_MIN_AREA * 4:
         return None
+
+    # 각 화소가 PAD 경계에서 얼마나 떨어져 있는지. 아래에서 테두리 링을 거를 때 쓴다.
+    dist = cv2.distanceTransform((shape > 0).astype(np.uint8), cv2.DIST_L2, 5)
+    min_clr = radius * VIA_MIN_CLEARANCE
 
     med = float(np.median(roi[inner > 0]))
     # 임계값을 0 이나 255 로 밀어버리면 전부 탈락/전부 통과가 되어 원인 파악이 어렵다.
@@ -665,14 +719,27 @@ def _find_via(roi: np.ndarray,
     #   이때 탈락시키면 멀쩡한 PAD 가 VIA_MISSING(코드 42) 으로 둔갑한다.
     #   실측에서 이 역전이 4건 나왔고, 대안이 있을 때만 거르도록 바꿔 0건이 됐다.
     # 즉 이 필터는 판정을 뒤집지 못하고 후보 선택만 바꾼다.
+    #
+    # 경계 여유는 이것들과 달리 '탈락' 이다. 되살리지 않는다.
+    # PAD 테두리에 딱 붙은 덩어리는 어떤 경우에도 VIA 가 아니기 때문이다.
+    # (VIA 는 PAD 안에 뚫린 구멍이라 정의상 경계에서 떨어져 있다.)
     best, best_area, best_shape = -1, 0, (0.0, 0.0)
     alt, alt_area, alt_shape = -1, 0, (0.0, 0.0)
     rejected = 0
+    edge_rejected = 0
     for i in range(1, num):
         a = int(stats[i, 4])
         if not (VIA_MIN_AREA <= a <= max_area):
             continue
         ys, xs = np.nonzero(lab == i)
+
+        # PAD 테두리를 두른 어두운 링 걸러내기.
+        # 링은 장단비 1.0 / 반경편차 0.1~0.2 라 모양으로는 '완벽한 원' 이고
+        # 무게중심도 PAD 중심과 겹쳐서 편심 0 = OK 로 나온다. 위치로만 잡힌다.
+        if float(dist[ys, xs].max()) < min_clr:
+            edge_rejected += 1
+            continue
+
         aspect, dev = _roundness(ys, xs)
         if a > alt_area:
             alt, alt_area, alt_shape = i, a, (aspect, dev)
@@ -683,8 +750,10 @@ def _find_via(roi: np.ndarray,
             best, best_area, best_shape = i, a, (aspect, dev)
 
     row["shape_rejected"] = rejected
+    row["edge_rejected"] = edge_rejected
     if best < 0:
         # 원형 후보가 없다. 모양을 포기하고 가장 큰 것을 쓴다 (없다고 하지는 않는다).
+        # 단 경계에 붙은 것은 여기서도 안 되살아난다 (애초에 alt 에 안 들어갔다).
         best, best_area, best_shape = alt, alt_area, alt_shape
     if best < 0:
         return None
@@ -774,10 +843,10 @@ def _print_table(code: str, rows: List[Dict[str, Any]]) -> None:
         return
 
     head = ("PAD", "판정", "PAD중심", "VIA중심", "편심px", "편심비율",
-            "허용", "VIA면적", "장단비", "반경편차", "모양탈락",
+            "허용", "VIA면적", "장단비", "반경편차", "모양탈락", "테두리탈락",
             "PAD밝기", "임계", "덮임", "정합이동")
-    print("%4s %-12s %-16s %-16s %7s %9s %6s %8s %7s %9s %9s %8s %6s %6s %12s" % head)
-    print("-" * 150)
+    print("%4s %-12s %-16s %-16s %7s %9s %6s %8s %7s %9s %9s %10s %8s %6s %6s %12s" % head)
+    print("-" * 162)
 
     def pt(v):
         return "-" if v is None else "(%.1f,%.1f)" % (v[0], v[1])
@@ -788,11 +857,12 @@ def _print_table(code: str, rows: List[Dict[str, Any]]) -> None:
     for r in rows:
         flag = "NG" if r["status"] in ("VIA_OFFSET", "VIA_MISSING") else "  "
         rej = r["shape_rejected"]
-        print("%4d %-12s %-16s %-16s %7s %9s %6s %8s %7s %9s %9s %8s %6s %6s %12s %s" % (
+        erej = r["edge_rejected"]
+        print("%4d %-12s %-16s %-16s %7s %9s %6s %8s %7s %9s %9s %10s %8s %6s %6s %12s %s" % (
             r["pad_id"], r["status"], pt(r["pad_center"]), pt(r["via_center"]),
             num(r["offset_px"]), num(r["offset_norm"], "%.4f"),
             "%.2f" % OFFSET_TOL, num(r["via_area"], "%d"),
             num(r["via_aspect"]), num(r["via_radial_dev"], "%.3f"),
-            "%d" % rej if rej else "-",
+            "%d" % rej if rej else "-", "%d" % erej if erej else "-",
             num(r["pad_median"], "%.1f"), num(r["dark_threshold"], "%.1f"),
             num(r["pad_coverage"], "%.2f"), pt(r["align_shift"]), flag))
